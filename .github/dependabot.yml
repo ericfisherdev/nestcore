@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in ci.yml current (Dependabot bumps both
+  # the pinned commit and its version comment).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+  # Keep the go.mod requirements current, including the lefthook/conform tool
+  # dependencies pinned there.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
