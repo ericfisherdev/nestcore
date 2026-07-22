@@ -97,10 +97,8 @@ func (s S3Config) Validate() []error {
 	if s.PresignTTL <= 0 {
 		errs = append(errs, fmt.Errorf("S3_PRESIGN_TTL must be positive, got %v", s.PresignTTL))
 	}
-	// Static credentials are both-or-neither: a lone access key or secret
-	// is always a misconfiguration, never a valid partial state.
-	if (s.AccessKeyID == "") != (s.SecretAccessKey == "") {
-		errs = append(errs, errors.New("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together (or both left unset to use the default AWS credential chain)"))
+	if err := validateCredentialPair("S3_ACCESS_KEY_ID", s.AccessKeyID, "S3_SECRET_ACCESS_KEY", s.SecretAccessKey); err != nil {
+		errs = append(errs, err)
 	}
 
 	return errs

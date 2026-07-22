@@ -88,9 +88,8 @@ func LoadHSTS() (HSTSConfig, []error) {
 func (h HSTSConfig) Validate() []error {
 	var errs []error
 
-	// A negative max-age is invalid; zero is allowed and means "use the
-	// built-in default". (max-age=0 to expire HSTS is achieved by simply
-	// disabling it via HSTS_ENABLED.)
+	// A negative max-age is invalid. Zero is allowed when explicitly set
+	// and emits max-age=0, which clears a previously-sent HSTS policy.
 	if h.Enabled && h.MaxAgeSet && h.MaxAge < 0 {
 		errs = append(errs, fmt.Errorf("HSTS_MAX_AGE must not be negative, got %v", h.MaxAge))
 	}

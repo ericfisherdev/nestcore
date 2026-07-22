@@ -57,10 +57,8 @@ func (e EmailConfig) Validate() []error {
 	if e.Region == "" {
 		errs = append(errs, errors.New("SES_REGION is required when NOTIFY_EMAIL_ENABLED=true"))
 	}
-	// Static credentials are both-or-neither, mirroring SMS's identical
-	// pairing check.
-	if (e.AccessKeyID == "") != (e.SecretAccessKey == "") {
-		errs = append(errs, errors.New("SES_ACCESS_KEY_ID and SES_SECRET_ACCESS_KEY must be set together (or both left unset to use the default AWS credential chain)"))
+	if err := validateCredentialPair("SES_ACCESS_KEY_ID", e.AccessKeyID, "SES_SECRET_ACCESS_KEY", e.SecretAccessKey); err != nil {
+		errs = append(errs, err)
 	}
 
 	return errs

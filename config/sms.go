@@ -84,10 +84,8 @@ func (s SMSConfig) Validate() []error {
 	if s.RetryMaxAttempts <= 0 {
 		errs = append(errs, fmt.Errorf("SMS_RETRY_MAX_ATTEMPTS must be positive, got %d", s.RetryMaxAttempts))
 	}
-	// Static credentials are both-or-neither, mirroring S3's identical
-	// pairing check.
-	if (s.AccessKeyID == "") != (s.SecretAccessKey == "") {
-		errs = append(errs, errors.New("SMS_ACCESS_KEY_ID and SMS_SECRET_ACCESS_KEY must be set together (or both left unset to use the default AWS credential chain)"))
+	if err := validateCredentialPair("SMS_ACCESS_KEY_ID", s.AccessKeyID, "SMS_SECRET_ACCESS_KEY", s.SecretAccessKey); err != nil {
+		errs = append(errs, err)
 	}
 
 	return errs

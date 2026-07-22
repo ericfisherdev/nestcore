@@ -28,7 +28,10 @@ func LoadTLS() TLSConfig {
 }
 
 // Validate returns every TLSConfig problem found, so callers can surface
-// them together.
+// them together. This is the same both-or-neither shape as
+// validateCredentialPair, but is not built on it: unlike S3/SMS/Email's
+// credential pairs, an unset TLS pair has no fallback credential chain to
+// mention, so the message differs.
 func (t TLSConfig) Validate() []error {
 	if (t.CertFile == "") != (t.KeyFile == "") {
 		return []error{errors.New("TLS_CERT_FILE and TLS_KEY_FILE must be set together (or both unset)")}
