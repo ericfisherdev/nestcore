@@ -14,6 +14,14 @@ GOLANGCI_LINT_VERSION := v2.11.4
 # Coverage profile written by `make test` and read by `make cover`.
 COVERAGE_OUT := coverage.out
 
+# Coverage profile written by `make test-gated`. It is a SEPARATE file because
+# the two runs cover the same packages to very different depths: without a
+# database the gated tests self-skip, so COVERAGE_OUT reports db/... as barely
+# covered. Both profiles are handed to Sonar, which unions them; keeping them
+# apart is what stops the skipped run from masking the real one. The
+# "coverage.*" name matters too — .gitignore already ignores that prefix.
+GATED_COVERAGE_OUT := coverage.gated.out
+
 # Packages containing database-gated tests. `make test` already runs these
 # packages too — their DB-dependent tests self-skip without the env var —
 # test-gated just runs them explicitly, with the env var required.
@@ -41,7 +49,7 @@ test-gated:
 	# migration runner, so their names must show up in a CI log as PASS/SKIP
 	# per test, not just one "ok" line per package that can't tell "ran and
 	# passed" apart from "every test skipped itself".
-	go test -race -v -count=1 $(GATED_TEST_PACKAGES)
+	go test -race -v -count=1 -coverprofile=$(GATED_COVERAGE_OUT) $(GATED_TEST_PACKAGES)
 
 ## cover: print a per-function coverage summary (runs test first)
 cover: test
@@ -69,7 +77,7 @@ tidy:
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(COVERAGE_OUT)
+	rm -f $(COVERAGE_OUT) $(GATED_COVERAGE_OUT)
 
 ## help: list available targets
 help:

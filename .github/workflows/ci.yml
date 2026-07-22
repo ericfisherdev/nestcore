@@ -170,6 +170,18 @@ jobs:
       - name: Test (gated, needs Postgres)
         run: make test-gated
 
+      - name: Upload gated coverage profile
+        # Without this the db/... coverage measured here is discarded, and Sonar
+        # only ever sees the build job's profile -- in which every gated test
+        # self-skipped for want of a database. That is what made db/migrate look
+        # 20% covered when its tests do run, and pass, in this job.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-gated
+          path: coverage.gated.out
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Save Go caches
         if: always() && github.event_name == 'push' && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -274,11 +286,14 @@ jobs:
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
-    # Gated on build purely to inherit its coverage profile. This does serialise
-    # the scan behind the test suite; the alternative -- running `make test`
-    # again inside this job -- keeps the two parallel but pays for a second
-    # race-instrumented run of the whole suite, which costs more than the wait.
-    needs: build
+    # Gated on both test jobs purely to inherit their coverage profiles. This
+    # does serialise the scan behind the test suites; the alternative -- running
+    # the tests again inside this job -- keeps them parallel but pays for a
+    # second race-instrumented run, which costs more than the wait.
+    #
+    # test-gated is included because its profile is the only evidence that
+    # db/... is actually covered: in the build job those tests self-skip.
+    needs: [build, test-gated]
     # Skip while a PR is a draft: a draft is work in progress, and an analysis of
     # it burns a scan to report findings the author is still mid-way through
     # creating. The ready_for_review trigger above runs it the moment the PR is
@@ -298,12 +313,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download coverage profile
-        # Lands coverage.out at the workspace root, where
-        # sonar.go.coverage.reportPaths expects it.
+      - name: Download coverage profiles
+        # Both artifacts land at the workspace root, where the two paths in
+        # sonar.go.coverage.reportPaths expect them. Sonar unions the profiles,
+        # so a line covered by either run counts as covered -- which is the
+        # whole point: db/... is covered only by the gated one.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: coverage
+          pattern: coverage*
+          merge-multiple: true
 
       - name: SonarQube Scan
         # Project key and organization come from sonar-project.properties at the
