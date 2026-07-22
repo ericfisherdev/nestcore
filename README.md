@@ -49,10 +49,12 @@ same version via `golangci/golangci-lint-action`; keep both in sync with
 
 ### Testing
 
-`make test` runs the full suite with the race detector. Some packages (added
-starting with the database extraction) additionally need a real Postgres
-instance and are gated behind the `NESTCORE_TEST_DATABASE_URL` environment
-variable — reserved here, wired up when that package lands.
+`make test` runs the default suite with the race detector — hermetic, no
+database required. `db/...` additionally has database-gated tests behind the
+`NESTCORE_TEST_DATABASE_URL` environment variable; run `make test-gated` to
+include that coverage. See [`docs/testing.md`](docs/testing.md) for the
+container recipe, the isolation model, and how a consuming application wires
+its own `dbtest.Harness`.
 
 ## Configuration
 

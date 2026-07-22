@@ -14,7 +14,13 @@ GOLANGCI_LINT_VERSION := v2.11.4
 # Coverage profile written by `make test` and read by `make cover`.
 COVERAGE_OUT := coverage.out
 
-.PHONY: all build test cover lint fmt hooks hooks-uninstall tidy clean help
+# Packages containing database-gated tests. `make test` already runs these
+# packages too — their DB-dependent tests self-skip without the env var —
+# test-gated just runs them explicitly, with the env var required.
+GATED_TEST_PACKAGES := \
+	./db/...
+
+.PHONY: all build test test-gated cover lint fmt hooks hooks-uninstall tidy clean help
 
 ## all: default aggregate target (alias for build)
 all: build
@@ -26,6 +32,12 @@ build:
 ## test: run the test suite with the race detector and write a coverage profile
 test:
 	go test -race -cover -coverprofile=$(COVERAGE_OUT) ./...
+
+## test-gated: run the database-gated suites (needs NESTCORE_TEST_DATABASE_URL)
+test-gated:
+	@test -n "$(NESTCORE_TEST_DATABASE_URL)" || \
+		{ echo "NESTCORE_TEST_DATABASE_URL is not set; see docs/testing.md"; exit 1; }
+	go test -race -count=1 $(GATED_TEST_PACKAGES)
 
 ## cover: print a per-function coverage summary (runs test first)
 cover: test
