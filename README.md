@@ -54,6 +54,66 @@ starting with the database extraction) additionally need a real Postgres
 instance and are gated behind the `NESTCORE_TEST_DATABASE_URL` environment
 variable — reserved here, wired up when that package lands.
 
+## Configuration
+
+`config` loads and validates runtime configuration from environment
+variables, one sub-config at a time (see the package doc for the loader /
+validator pattern). Every variable below is read exclusively from the
+environment; an optional `.env` file is honored in development only, via
+`LoadDotenv`, and never overrides a variable the real environment already
+set.
+
+An application composes its own root configuration from these sub-configs
+and adds whatever is specific to its own domain — see `config.go`'s
+`AppEnv`, `ValidateAppEnv`, and `LoadDotenv` for the pieces a composition
+needs beyond the sub-configs themselves.
+
+| Variable | Sub-config | Default |
+|---|---|---|
+| `APP_ENV` | — | `dev` (`dev`\|`test`\|`prod`) |
+| `PORT` | Server | `8080` |
+| `TRUSTED_PROXIES` | Server | `127.0.0.0/8,::1/128` |
+| `SERVER_REQUEST_TIMEOUT` | Server | `120s` (floor `15s`) |
+| `PUBLIC_BASE_URL` | Server | empty (derive from the request) |
+| `DATABASE_URL` | DB | none — required, no development fallback |
+| `DB_MAX_CONNS` | DB | `0` (let the pool decide; `10` when `DB_PROVIDER=supabase` and unset) |
+| `DB_CONNECT_TIMEOUT` | DB | `5s` |
+| `DB_PROVIDER` | DB | `postgres` (`postgres`\|`supabase`) |
+| `DB_POOL_MODE` | DB | `session` (`session`\|`transaction`) |
+| `DB_SSL_ROOT_CERT` | DB | empty |
+| `MIGRATE_DATABASE_URL` | DB | empty (reuse `DATABASE_URL`) |
+| `SESSION_SECRET` | Session | `config.DevSessionSecret` (dev-only; rejected in prod) |
+| `SESSION_LIFETIME` | Session | `12h` |
+| `SESSION_COOKIE_SECURE` | Session | `auto` (`auto`\|`true`\|`false`) |
+| `ENCRYPTION_KEY` | Crypto | `config.DevEncryptionKey` (dev-only; rejected in prod) |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | TLS | empty — both or neither |
+| `HSTS_ENABLED` | HSTS | `false` |
+| `HSTS_MAX_AGE` | HSTS | `config.DefaultHSTSMaxAge` (~180d) when enabled and unset |
+| `HSTS_INCLUDE_SUBDOMAINS` | HSTS | `false` |
+| `HSTS_PRELOAD` | HSTS | `false` (requires includeSubDomains + max-age >= 1y) |
+| `S3_ENDPOINT` | S3 | empty (real AWS S3) |
+| `S3_REGION` | S3 | empty |
+| `S3_BUCKET` | S3 | empty |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | S3 | empty — both or neither (else the default AWS credential chain) |
+| `S3_USE_PATH_STYLE` | S3 | `false` |
+| `S3_PRESIGN_TTL` | S3 | `15m` |
+| `NOTIFY_SMS_ENABLED` | SMS | `false` |
+| `SMS_ORIGINATION_IDENTITY` | SMS | empty — required when enabled |
+| `SMS_REGION` | SMS | empty — required when enabled |
+| `SMS_ACCESS_KEY_ID` / `SMS_SECRET_ACCESS_KEY` | SMS | empty — both or neither |
+| `SMS_RETRY_MAX_ATTEMPTS` | SMS | `3` |
+| `NOTIFY_EMAIL_ENABLED` | Email | `false` |
+| `SES_FROM_ADDRESS` | Email | empty — required when enabled |
+| `SES_REGION` | Email | empty — required when enabled |
+| `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY` | Email | empty — both or neither |
+| `CACHE_DIR` | Cache | `./.localdata/cache` |
+
+`S3Config.Validate` is caller-gated rather than self-gating on an `Enabled`
+field: nestcore has no storage-backend selector of its own, so a consuming
+application calls `LoadS3`/`S3Config.Validate` only when its own selector
+opted into S3. `SMSConfig` and `EmailConfig` self-gate on their own
+`Enabled` field instead, since that field travels with the type.
+
 ## License
 
 [AGPL-3.0](LICENSE), matching both consumers (Nestova, Nestorage).
