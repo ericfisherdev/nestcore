@@ -62,6 +62,19 @@ func TestNewPromTickRecorderEmptyNamespacePanics(t *testing.T) {
 	metrics.NewPromTickRecorder(metrics.NewRegistry(), "", testKnownSchedulers)
 }
 
+// TestNewPromTickRecorderKnownContainingOtherPanics guards the reserved
+// fallback label: if a caller's own allowlist included SchedulerName("other"),
+// that legitimate scheduler's ticks would land in the exact same series as
+// every truly unknown name, silently merging two different populations.
+func TestNewPromTickRecorderKnownContainingOtherPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error(`NewPromTickRecorder with "other" in known did not panic`)
+		}
+	}()
+	metrics.NewPromTickRecorder(metrics.NewRegistry(), testNamespace, []metrics.SchedulerName{"other"})
+}
+
 // TestObserveTickErrorCountsErrorAndKeepsLastSuccess is the canonical
 // failing-tick behaviour check: an error increments
 // ticks_total{result="error"}, observes the duration, and does NOT move the
