@@ -77,10 +77,12 @@ var _ TickRecorder = (*PromTickRecorder)(nil)
 // the point.
 //
 // It panics when reg is nil or namespace is empty (matching the platform
-// convention of failing loudly at construction for required dependencies)
-// and when a metric with the same name is already registered, so a
-// double-wired registry surfaces at boot rather than as silently shared
-// counters.
+// convention of failing loudly at construction for required dependencies),
+// when known contains the reserved SchedulerName("other") — that would let
+// a legitimate scheduler share the collapsed-fallback series with every
+// truly unknown name, defeating the point of the allowlist — and when a
+// metric with the same name is already registered, so a double-wired
+// registry surfaces at boot rather than as silently shared counters.
 func NewPromTickRecorder(reg prometheus.Registerer, namespace string, known []SchedulerName) *PromTickRecorder {
 	if reg == nil {
 		panic("metrics: NewPromTickRecorder requires a non-nil registerer")
@@ -90,6 +92,9 @@ func NewPromTickRecorder(reg prometheus.Registerer, namespace string, known []Sc
 	}
 	knownSet := make(map[SchedulerName]struct{}, len(known))
 	for _, name := range known {
+		if name == SchedulerName(schedulerOther) {
+			panic(`metrics: NewPromTickRecorder's known allowlist must not include the reserved "other" scheduler name`)
+		}
 		knownSet[name] = struct{}{}
 	}
 
