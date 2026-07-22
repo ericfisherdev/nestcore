@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # ready_for_review is NOT in the default type set, and omitting it would
+    # quietly break the SonarQube gate: the scan is skipped while a PR is a
+    # draft, so without a run triggered by the draft -> ready transition the
+    # check would never execute on a PR that is actually up for merge.
+    types: [opened, synchronize, reopened, ready_for_review]
   # Runs on main exist to populate the *default-branch* cache scope. A workflow
   # run may only restore caches written by its own ref or by the default branch,
   # so without this trigger every PR starts from a cold Go cache and recompiles
@@ -274,6 +279,15 @@ jobs:
     # again inside this job -- keeps the two parallel but pays for a second
     # race-instrumented run of the whole suite, which costs more than the wait.
     needs: build
+    # Skip while a PR is a draft: a draft is work in progress, and an analysis of
+    # it burns a scan to report findings the author is still mid-way through
+    # creating. The ready_for_review trigger above runs it the moment the PR is
+    # genuinely up for review.
+    #
+    # The event_name arm is load-bearing. On a push, github.event.pull_request is
+    # null, and `null == false` is false in GitHub expressions -- so testing only
+    # the draft field would silently stop analysing main.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -296,5 +310,12 @@ jobs:
         # repo root. SONAR_HOST_URL is deliberately unset: the action targets
         # SonarQube Cloud by default, which is the instance this project uses.
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        with:
+          # Without this the scanner uploads the report and exits 0 regardless of
+          # the verdict, so the job goes green on a failing gate and gates
+          # nothing. sonar.qualitygate.wait makes it poll for the computed status
+          # and exit non-zero when the gate fails, which is what lets this job be
+          # a required check.
+          args: -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
