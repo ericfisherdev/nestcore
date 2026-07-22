@@ -68,9 +68,10 @@ func Duration(key string, fallback time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-// Bool parses a boolean environment variable (strconv.ParseBool: 1/t/true,
-// 0/f/false, case-insensitive), returning fallback when unset or empty and
-// an error when present but invalid.
+// Bool parses a boolean environment variable via strconv.ParseBool, which
+// accepts 1/t/T/TRUE/true/True and 0/f/F/FALSE/false/False (not an arbitrary
+// mixed case like "tRuE"), returning fallback when unset or empty and an
+// error when present but invalid.
 func Bool(key string, fallback bool) (bool, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
