@@ -148,8 +148,20 @@ very primitives `dbtest` depends on, so they must not be layered over it
 either. Its gated tests exercise a fixture migration set under
 `db/migrate/testdata/`, never a product schema.
 
-## No CI database
+## CI runs the gated suite too
 
-CI runs `make test` only; the gated suite stays local and unwired from any
-service container. That is a deliberate scope boundary, not an oversight —
-see the module README for what nestcore's CI does and does not cover.
+The `test-gated` job in `.github/workflows/ci.yml` runs `make test-gated`
+against a `postgres:16-alpine` service container — the same floor version
+and `nestcore_test` database name as the local recipe above, so a failure
+reproduces locally with the same commands. The service's health check gates
+the job's steps, so there is no hand-rolled ready-loop the way there is for
+a detached local `docker run`.
+
+This is not optional coverage: with CodeRabbit PR reviews no longer gating
+merges, `test-gated` is the only automated check on the db pool and the
+migration runner, and both consuming applications depend on them. The
+Makefile target runs with `-v` specifically so the job's log shows each
+gated test PASS or SKIP by name — a package-level "ok" line alone can't
+distinguish "ran and passed" from "every test skipped itself" (e.g. a
+misnamed or missing environment variable), and a green check on the latter
+would be false confidence.

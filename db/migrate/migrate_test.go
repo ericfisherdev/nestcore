@@ -224,6 +224,14 @@ func dbnameValueSpan(conninfo string) (start, end int, ok bool) {
 	return start, end, ok
 }
 
+// The gated tests below deliberately use context.Background(), not
+// t.Context(): t.Context() is canceled just before Cleanup-registered
+// functions run, and every one of these tests registers a cleanup that
+// itself calls r.Reset against ctx. A canceled ctx there does not fail the
+// test — Reset returns an error that only reaches t.Logf — it just makes
+// the cleanup Reset silently do nothing, discovered by running these tests
+// against a real Postgres for the first time (see NSTR-6's CI wiring).
+
 // TestReset_OnPristineDatabase_IsANoOp proves the behaviour delta from the
 // legacy dispatcher: Reset no longer needs a special case for a database
 // with no goose_db_version table, because Provider.DownTo ensures that
@@ -231,7 +239,7 @@ func dbnameValueSpan(conninfo string) (start, end int, ok bool) {
 func TestReset_OnPristineDatabase_IsANoOp(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -242,7 +250,7 @@ func TestReset_OnPristineDatabase_IsANoOp(t *testing.T) {
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("Reset on pristine database: %v", err)
 	}
-	if v := appliedVersion(t, r, dsn); v != 0 {
+	if v := appliedVersion(ctx, t, r, dsn); v != 0 {
 		t.Errorf("applied version after Reset on pristine database = %d, want 0", v)
 	}
 }
@@ -253,7 +261,7 @@ func TestReset_OnPristineDatabase_IsANoOp(t *testing.T) {
 func TestUpDownRoundTrip(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -289,7 +297,7 @@ func TestUpDownRoundTrip(t *testing.T) {
 func TestDown_RollsBackExactlyOneVersion(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -303,19 +311,19 @@ func TestDown_RollsBackExactlyOneVersion(t *testing.T) {
 	if err := r.Up(ctx, dsn); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	top := appliedVersion(t, r, dsn)
+	top := appliedVersion(ctx, t, r, dsn)
 
 	if err := r.Down(ctx, dsn); err != nil {
 		t.Fatalf("Down: %v", err)
 	}
-	if got := appliedVersion(t, r, dsn); got != top-1 {
+	if got := appliedVersion(ctx, t, r, dsn); got != top-1 {
 		t.Errorf("applied version after Down = %d, want %d", got, top-1)
 	}
 
 	if err := r.Up(ctx, dsn); err != nil {
 		t.Fatalf("Up after Down: %v", err)
 	}
-	if got := appliedVersion(t, r, dsn); got != top {
+	if got := appliedVersion(ctx, t, r, dsn); got != top {
 		t.Errorf("applied version after re-Up = %d, want %d", got, top)
 	}
 }
@@ -326,7 +334,7 @@ func TestDown_RollsBackExactlyOneVersion(t *testing.T) {
 func TestUpTo_LandsOnRequestedVersion(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -341,7 +349,7 @@ func TestUpTo_LandsOnRequestedVersion(t *testing.T) {
 	if err := r.UpTo(ctx, dsn, target); err != nil {
 		t.Fatalf("UpTo(%d): %v", target, err)
 	}
-	if got := appliedVersion(t, r, dsn); got != target {
+	if got := appliedVersion(ctx, t, r, dsn); got != target {
 		t.Errorf("applied version after UpTo(%d) = %d, want %d", target, got, target)
 	}
 	if !tableExists(t, dsn, "widget") {
@@ -357,7 +365,7 @@ func TestUpTo_LandsOnRequestedVersion(t *testing.T) {
 func TestDownTo_LandsOnRequestedVersion(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -375,7 +383,7 @@ func TestDownTo_LandsOnRequestedVersion(t *testing.T) {
 	if err := r.DownTo(ctx, dsn, target); err != nil {
 		t.Fatalf("DownTo(%d): %v", target, err)
 	}
-	if got := appliedVersion(t, r, dsn); got != target {
+	if got := appliedVersion(ctx, t, r, dsn); got != target {
 		t.Errorf("applied version after DownTo(%d) = %d, want %d", target, got, target)
 	}
 	if tableExists(t, dsn, "gadget") {
@@ -391,7 +399,7 @@ func TestDownTo_LandsOnRequestedVersion(t *testing.T) {
 func TestStatus_ReportsAppliedPendingSplit(t *testing.T) {
 	dsn := isolatedDSN(t)
 	r := newFixtureRunner(t)
-	ctx := t.Context()
+	ctx := context.Background()
 
 	if err := r.Reset(ctx, dsn); err != nil {
 		t.Fatalf("initial Reset: %v", err)
@@ -440,16 +448,18 @@ func TestStatus_ReportsAppliedPendingSplit(t *testing.T) {
 }
 
 // appliedVersion returns the current goose migration version recorded in the
-// database, via r's own Provider rather than any global goose state.
-func appliedVersion(t *testing.T, r *Runner, dsn string) int64 {
+// database, via r's own Provider rather than any global goose state. Takes
+// ctx from the caller rather than manufacturing its own, matching every
+// other helper here.
+func appliedVersion(ctx context.Context, t *testing.T, r *Runner, dsn string) int64 {
 	t.Helper()
-	p, err := r.newProvider(t.Context(), dsn, nil)
+	p, err := r.newProvider(ctx, dsn, nil)
 	if err != nil {
 		t.Fatalf("build provider: %v", err)
 	}
 	defer func() { _ = p.Close() }()
 
-	v, err := p.GetDBVersion(t.Context())
+	v, err := p.GetDBVersion(ctx)
 	if err != nil {
 		t.Fatalf("GetDBVersion: %v", err)
 	}
