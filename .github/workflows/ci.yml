@@ -179,3 +179,24 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: go tool conform enforce --base-branch="origin/${BASE_REF}"
+
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Sonar reads SCM blame from the local history to attribute issues and
+          # to decide what counts as "new code". A shallow clone degrades both,
+          # so full history is required here even though the other jobs skip it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: SonarQube Scan
+        # Project key and organization come from sonar-project.properties at the
+        # repo root. SONAR_HOST_URL is deliberately unset: the action targets
+        # SonarQube Cloud by default, which is the instance this project uses.
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
