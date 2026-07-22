@@ -1,0 +1,253 @@
+// Package httpserver wires the HTTP transport: the router, the core
+// middleware chain, and the server lifecycle. It owns the New constructor
+// that an application extends by adding fields to Deps and mounting its own
+// routes through Deps.Routes; the routes registered here (/healthz, /readyz,
+// optional /metrics) are transport-generic — an application's pages, static
+// assets, and any other embedded content are wired in by the application
+// itself, not by this package.
+package httpserver
+
+import (
+	"context"
+	"crypto/tls"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/ericfisherdev/nestcore/config"
+	"github.com/ericfisherdev/nestcore/httpserver/middleware"
+	"github.com/ericfisherdev/nestcore/metrics"
+)
+
+const (
+	// readinessTimeout bounds the dependency check performed by the readiness
+	// probe so a stalled dependency cannot hang the endpoint.
+	readinessTimeout = 2 * time.Second
+	// requestTimeoutMargin is subtracted from cfg.Server.RequestTimeout to get
+	// the per-request context deadline (middleware.Timeout): it must stay
+	// short of the connection-level WriteTimeout (set to the same
+	// RequestTimeout) so a handler has time to write a clean 500/503 after its
+	// context cancels, rather than racing the connection's write deadline.
+	// config.minServerRequestTimeout keeps RequestTimeout comfortably above
+	// this margin for any config that went through Validate.
+	requestTimeoutMargin = 5 * time.Second
+
+	// staticCacheControl is the Cache-Control StaticFileServer applies. A
+	// long/immutable cache is intentionally avoided: asset URLs are not
+	// content-hashed, so a deploy reuses the same paths and an
+	// over-aggressive cache would serve stale CSS/JS.
+	staticCacheControl = "public, max-age=3600"
+)
+
+// Config is the configuration the HTTP transport needs — the generic
+// sub-configs New actually reads, not an application's root configuration
+// (which stays app-side; see the config package doc comment). A generic
+// sub-config New comes to need later is added as a new field here rather
+// than changing New's signature.
+type Config struct {
+	Server config.ServerConfig
+	HSTS   config.HSTSConfig
+}
+
+// ReadinessFunc reports whether the server's backing dependencies (e.g. the
+// database) are reachable. It returns a non-nil error when the server is not
+// ready to serve traffic.
+type ReadinessFunc func(ctx context.Context) error
+
+// Deps carries the dependencies the HTTP layer needs. An application appends
+// fields here (session manager, repositories, handlers) rather than changing
+// the New signature.
+type Deps struct {
+	// Logger receives the structured per-request log line. Required.
+	Logger *slog.Logger
+	// Ready backs the /readyz probe; nil means "always ready".
+	Ready ReadinessFunc
+	// Routes, if non-nil, registers an application's own routes (pages, HTMX
+	// fragments, static assets, feature handlers) on the mux after the
+	// platform routes. This is the extension point for application wiring
+	// without changing New.
+	Routes func(mux *http.ServeMux)
+	// Middleware is an optional list of feature middleware inserted between
+	// Timeout and CaptureRoutePattern in the canonical chain (e.g.
+	// session/auth), so Timeout's deadline still bounds that middleware's
+	// own work, not just the final handler. Middleware is applied in the
+	// order given (first entry is outermost).
+	Middleware []middleware.Middleware
+	// HTTPMetrics, if non-nil, enables per-request Prometheus instrumentation
+	// (request count, latency, in-flight gauge) via the Metrics middleware.
+	// nil disables instrumentation (tests, first-run setup).
+	HTTPMetrics *metrics.HTTPMetrics
+	// MetricsHandler, if non-nil, is served at GET /metrics (the Prometheus
+	// scrape endpoint, typically promhttp.HandlerFor over the registry that
+	// HTTPMetrics is registered on). nil leaves the route unregistered.
+	MetricsHandler http.Handler
+}
+
+// New builds the application's HTTP server from cfg and deps with the core
+// middleware (request id, structured logging, panic recovery, per-request
+// timeout) applied to every route. ReadHeaderTimeout stays a short, fixed
+// guard against Slowloris-style header trickling regardless of upload size;
+// ReadTimeout/WriteTimeout and the per-request context deadline all derive
+// from cfg.Server.RequestTimeout, since a legitimate large photo upload over a
+// slow connection needs a body-read (and therefore also a write-deadline)
+// budget well beyond what a small fast request needs — see RequestTimeout's
+// doc comment for why WriteTimeout must grow too, not just ReadTimeout.
+func New(cfg Config, deps Deps) *http.Server {
+	// Logger is required: the logging and recovery middleware use it on every
+	// request. Fail loudly at construction rather than panicking mid-request.
+	if deps.Logger == nil {
+		panic("httpserver: Deps.Logger is required")
+	}
+	// The per-request context deadline stays requestTimeoutMargin short of
+	// RequestTimeout (used below for the connection-level ReadTimeout and
+	// WriteTimeout) so a handler whose context expires still has that margin
+	// to write a clean 500/503 before the connection's own write deadline
+	// would cut it off. config.minServerRequestTimeout keeps this positive
+	// for any config that went through Validate.
+	requestTimeout := cfg.Server.RequestTimeout - requestTimeoutMargin
+	// Canonical middleware order (outermost first): request id wraps everything so
+	// every request is logged with an id even on panic; ForwardedHeaders resolves
+	// the effective scheme/client IP from a trusted proxy before anything reads
+	// them; SecurityHeaders sets baseline headers (and HSTS, gated on the resolved
+	// scheme) on every response; logging records the request; metrics observes it —
+	// it sits inside RequestLogger so it reuses the responseWriter the logger
+	// creates, and outside Recoverer so a recovered panic's 500 (written through
+	// that shared wrapper) is recorded with the real final status; recovery turns
+	// panics into 500s; the per-request timeout comes next so its deadline also
+	// bounds any feature middleware appended below (which may do database work),
+	// not just the final handler. CaptureRoutePattern is appended innermost
+	// (directly wrapping the mux) to relay the matched route pattern back to the
+	// metrics middleware: Timeout and any feature middleware derive request copies
+	// via WithContext, so the mux's write to r.Pattern never reaches the request
+	// value the metrics middleware holds.
+	chain := []middleware.Middleware{
+		middleware.RequestID,
+		middleware.ForwardedHeaders(cfg.Server.TrustedProxyPrefixes()),
+		middleware.SecurityHeaders(hstsHeaderValue(cfg.HSTS)),
+		middleware.RequestLogger(deps.Logger),
+		middleware.Metrics(deps.HTTPMetrics),
+		middleware.Recoverer(deps.Logger),
+	}
+	// A zero (or negative) requestTimeout means cfg.Server.RequestTimeout never
+	// went through config.ServerConfig.Validate (which enforces a floor
+	// comfortably above requestTimeoutMargin) — most likely a hand-built
+	// ServerConfig backing a minimal bootstrap server. Installing
+	// middleware.Timeout(requestTimeout) in that case would hand every request
+	// an already-expired context, so the middleware is omitted entirely rather
+	// than installed with a nonsensical deadline; a validated config never
+	// reaches this branch, so behavior for real deployments is unchanged.
+	if requestTimeout > 0 {
+		chain = append(chain, middleware.Timeout(requestTimeout))
+	}
+	chain = append(chain, deps.Middleware...)
+	chain = append(chain, middleware.CaptureRoutePattern)
+
+	handler := middleware.Chain(chain...)(routes(deps))
+
+	return &http.Server{
+		Addr:           cfg.Server.Addr,
+		Handler:        handler,
+		MaxHeaderBytes: 1 << 20, // 1 MiB, bounding header memory per connection.
+		// Short and fixed: headers are small regardless of upload size, so this
+		// guards against Slowloris-style header trickling without needing to
+		// grow alongside RequestTimeout.
+		ReadHeaderTimeout: 5 * time.Second,
+		// Bounds reading the entire request, body included (net/http docs) — so
+		// this must cover the slowest legitimate upload, not just headers.
+		ReadTimeout: cfg.Server.RequestTimeout,
+		// The write deadline is armed once, when headers finish being read
+		// (net/http.conn.readRequest), and does not reset while the body is
+		// still being read afterward — so if this were shorter than the time a
+		// slow upload's body read takes, the deadline would already be past by
+		// the time the handler tries to write its response, even though the
+		// upload itself succeeded. Matching it to RequestTimeout (the same
+		// budget ReadTimeout uses) avoids that.
+		WriteTimeout: cfg.Server.RequestTimeout,
+		IdleTimeout:  60 * time.Second,
+		// Secure floor for the app-terminated TLS path; unused when the server
+		// serves plain HTTP behind a TLS-terminating proxy. Go negotiates TLS
+		// 1.3 when available and falls back no lower than 1.2.
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+}
+
+// hstsHeaderValue builds the Strict-Transport-Security header value from cfg, or
+// "" when HSTS is disabled. max-age is emitted as whole seconds.
+func hstsHeaderValue(c config.HSTSConfig) string {
+	if !c.Enabled {
+		return ""
+	}
+	// EffectiveMaxAge applies the built-in default only when unset; an explicit
+	// max-age=0 is emitted verbatim to clear a previously-sent HSTS policy.
+	v := "max-age=" + strconv.FormatInt(int64(c.EffectiveMaxAge().Seconds()), 10)
+	if c.IncludeSubdomains {
+		v += "; includeSubDomains"
+	}
+	if c.Preload {
+		v += "; preload"
+	}
+	return v
+}
+
+// routes registers the base HTTP routes shared across every application.
+// Application routes are mounted through Deps.Routes.
+func routes(deps Deps) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /readyz", handleReadyz(deps.Ready))
+	// Prometheus scrape endpoint. Intentionally unauthenticated, like /healthz:
+	// it is scraped over the internal network and exposes only operational
+	// counters/gauges, no user data.
+	if deps.MetricsHandler != nil {
+		mux.Handle("GET /metrics", deps.MetricsHandler)
+	}
+	// Application routes (pages, fragments, static assets, feature handlers)
+	// register here.
+	if deps.Routes != nil {
+		deps.Routes(mux)
+	}
+	return mux
+}
+
+// StaticFileServer serves fsys with a moderate cache lifetime and nosniff.
+// Mount it under a prefix, e.g.
+// mux.Handle("GET /static/", http.StripPrefix("/static/", httpserver.StaticFileServer(web.StaticFS())))
+func StaticFileServer(fsys fs.FS) http.Handler {
+	assets := http.FileServerFS(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", staticCacheControl)
+		// Prevent MIME sniffing away from the declared content type.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		assets.ServeHTTP(w, r)
+	})
+}
+
+// handleHealthz reports process liveness for load balancers and uptime checks.
+// It does not touch backing dependencies; use /readyz for that.
+func handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// handleReadyz reports whether the server is ready to serve traffic by checking
+// its backing dependencies via ready. It returns 200 when ready (or when no
+// readiness check is configured) and 503 when a dependency is unreachable.
+func handleReadyz(ready ReadinessFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if ready != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+			defer cancel()
+			if err := ready(ctx); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("unavailable"))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	}
+}
