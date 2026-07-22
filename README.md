@@ -52,7 +52,10 @@ same version via `golangci/golangci-lint-action`; keep both in sync with
 `make test` runs the default suite with the race detector — hermetic, no
 database required. `db/...` additionally has database-gated tests behind the
 `NESTCORE_TEST_DATABASE_URL` environment variable; run `make test-gated` to
-include that coverage. See [`docs/testing.md`](docs/testing.md) for the
+include that coverage. The role that variable's DSN authenticates as needs
+the `CREATEDB` privilege — the gated harness creates a database per package
+on demand. CI runs `make test-gated` too, against a `postgres:16-alpine`
+service container. See [`docs/testing.md`](docs/testing.md) for the
 container recipe, the isolation model, and how a consuming application wires
 its own `dbtest.Harness`.
 

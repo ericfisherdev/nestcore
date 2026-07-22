@@ -37,7 +37,11 @@ test:
 test-gated:
 	@test -n "$(NESTCORE_TEST_DATABASE_URL)" || \
 		{ echo "NESTCORE_TEST_DATABASE_URL is not set; see docs/testing.md"; exit 1; }
-	go test -race -count=1 $(GATED_TEST_PACKAGES)
+	# -v: gated tests are the only automated check on the db pool and the
+	# migration runner, so their names must show up in a CI log as PASS/SKIP
+	# per test, not just one "ok" line per package that can't tell "ran and
+	# passed" apart from "every test skipped itself".
+	go test -race -v -count=1 $(GATED_TEST_PACKAGES)
 
 ## cover: print a per-function coverage summary (runs test first)
 cover: test
