@@ -134,11 +134,19 @@ SELECT format('DROP DATABASE %I;', datname)
 \gexec
 ```
 
-### The one exception
+### The exceptions
 
 `db/db_test.go` reads the variable directly rather than going through
 `dbtest`: it only opens a connection and pings it, so it has nothing to
 isolate and cannot corrupt another package's fixture.
+
+`db/migrate` derives its own isolated database the same way `dbtest` does,
+but without importing it: `dbtest.Harness` is built ON `db/migrate` (a
+consuming application wires a `*migrate.Runner` in as its `Migrator`), so
+`db/migrate` importing `dbtest` back would be a cycle — and these are the
+very primitives `dbtest` depends on, so they must not be layered over it
+either. Its gated tests exercise a fixture migration set under
+`db/migrate/testdata/`, never a product schema.
 
 ## No CI database
 
