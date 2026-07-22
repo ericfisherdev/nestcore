@@ -73,6 +73,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload coverage profile
+        # Handed to the sonarqube job below. Coverage travels as an artifact so
+        # the scan does not have to re-run the (race-instrumented) suite purely
+        # to regenerate a file this job already produced. No `always()`: a
+        # failed test run means a partial profile, and a failed build skips the
+        # scan anyway.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+          # Consumed within the same run; no reason to keep it the default 90 days.
+          retention-days: 1
+
       - name: Save Go caches
         # Only main-branch runs write the cache. PRs restore but never save,
         # which is what keeps the repo under GitHub's 10 GB cache ceiling: one
@@ -255,6 +269,11 @@ jobs:
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
+    # Gated on build purely to inherit its coverage profile. This does serialise
+    # the scan behind the test suite; the alternative -- running `make test`
+    # again inside this job -- keeps the two parallel but pays for a second
+    # race-instrumented run of the whole suite, which costs more than the wait.
+    needs: build
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -264,6 +283,13 @@ jobs:
           # so full history is required here even though the other jobs skip it.
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Download coverage profile
+        # Lands coverage.out at the workspace root, where
+        # sonar.go.coverage.reportPaths expects it.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage
 
       - name: SonarQube Scan
         # Project key and organization come from sonar-project.properties at the
