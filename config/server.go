@@ -90,14 +90,12 @@ func LoadServer() (ServerConfig, []error) {
 
 	// TRUSTED_PROXIES: LookupEnv distinguishes "unset" (apply the loopback
 	// default) from an explicit empty value (trust nothing, ignoring
-	// forwarded headers). The raw value is stored on ServerConfig; validate
-	// it now so a malformed CIDR fails fast.
+	// forwarded headers). The raw value is stored on ServerConfig; Validate
+	// checks it is parseable, matching every other syntactic check in this
+	// package.
 	trustedProxies, ok := os.LookupEnv("TRUSTED_PROXIES")
 	if !ok {
 		trustedProxies = defaultTrustedProxies
-	}
-	if _, err := parseTrustedProxies(trustedProxies); err != nil {
-		errs = append(errs, err)
 	}
 
 	// PUBLIC_BASE_URL: TrimRight (not TrimSuffix, which removes only ONE
@@ -122,6 +120,10 @@ func (s ServerConfig) Validate() []error {
 	if s.RequestTimeout < minServerRequestTimeout {
 		errs = append(errs, fmt.Errorf("SERVER_REQUEST_TIMEOUT must be at least %v, got %v",
 			minServerRequestTimeout, s.RequestTimeout))
+	}
+
+	if _, err := parseTrustedProxies(s.TrustedProxies); err != nil {
+		errs = append(errs, err)
 	}
 
 	// PUBLIC_BASE_URL is optional (empty means "derive from the request"),

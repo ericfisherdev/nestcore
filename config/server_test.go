@@ -94,6 +94,15 @@ func TestServerConfigValidate(t *testing.T) {
 			wantContains: []string{"SERVER_REQUEST_TIMEOUT", "at least"},
 		},
 		{
+			name: "empty trusted proxies passes (trusts nothing)",
+			cfg:  config.ServerConfig{RequestTimeout: 120 * time.Second},
+		},
+		{
+			name:         "malformed trusted proxies CIDR",
+			cfg:          config.ServerConfig{RequestTimeout: 120 * time.Second, TrustedProxies: "127.0.0.0/8, not-a-cidr"},
+			wantContains: []string{"TRUSTED_PROXIES", "not-a-cidr"},
+		},
+		{
 			name:         "malformed public base url",
 			cfg:          config.ServerConfig{RequestTimeout: 120 * time.Second, PublicBaseURL: "not-a-url"},
 			wantContains: []string{"PUBLIC_BASE_URL", "absolute"},
@@ -197,12 +206,15 @@ func TestTrustedProxies(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed CIDR is reported", func(t *testing.T) {
+	t.Run("malformed CIDR is reported by Validate", func(t *testing.T) {
 		setEnv(t, map[string]string{"TRUSTED_PROXIES": "127.0.0.0/8, not-a-cidr"})
-		_, errs := config.LoadServer()
-		joined := errsToString(errs)
+		cfg, errs := config.LoadServer()
+		if len(errs) > 0 {
+			t.Fatalf("LoadServer() unexpected errors: %v", errs)
+		}
+		joined := errsToString(cfg.Validate())
 		if !contains(joined, "TRUSTED_PROXIES") || !contains(joined, "not-a-cidr") {
-			t.Errorf("LoadServer() errors = %q, want it to name TRUSTED_PROXIES and the bad entry", joined)
+			t.Errorf("Validate() = %q, want it to name TRUSTED_PROXIES and the bad entry", joined)
 		}
 	})
 }
