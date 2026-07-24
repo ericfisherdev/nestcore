@@ -150,4 +150,6 @@ type NopTickRecorder struct{}
 var _ TickRecorder = NopTickRecorder{}
 
 // ObserveTick discards the observation.
-func (NopTickRecorder) ObserveTick(SchedulerName, time.Duration, error) {}
+func (NopTickRecorder) ObserveTick(SchedulerName, time.Duration, error) {
+	// Intentional no-op: the null-object recorder discards all observations.
+}
