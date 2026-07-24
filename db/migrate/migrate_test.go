@@ -175,53 +175,96 @@ func isolatedDSN(t *testing.T) string {
 // dbnameValueSpan locates the dbname value in a libpq conninfo string,
 // returning its half-open byte range; when dbname repeats, the LAST
 // occurrence wins, matching libpq. Mirrors dbtest's scanner of the same
-// name (see isolatedDSN for why this package cannot import dbtest).
+// name (see isolatedDSN for why this package cannot import dbtest), split
+// into the same key/quoted-value/bare-value helpers dbtest uses, both to
+// keep this function's cognitive complexity low and to keep the two
+// scanners easy to compare when either changes.
 func dbnameValueSpan(conninfo string) (start, end int, ok bool) {
-	isSpace := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
 	i := 0
 	for i < len(conninfo) {
-		for i < len(conninfo) && isSpace(conninfo[i]) {
-			i++
-		}
+		i = skipConninfoSpace(conninfo, i)
 		if i >= len(conninfo) {
 			break
 		}
-		keyStart := i
-		for i < len(conninfo) && conninfo[i] != '=' && !isSpace(conninfo[i]) {
-			i++
-		}
-		key := conninfo[keyStart:i]
+		key, next := scanConninfoKey(conninfo, i)
+		i = next
 		if i >= len(conninfo) || conninfo[i] != '=' {
-			continue
+			continue // malformed fragment; let pgx report it
 		}
-		i++
+		i++ // consume '='
 		valStart := i
-		if i < len(conninfo) && conninfo[i] == '\'' {
-			i++
-			for i < len(conninfo) {
-				if conninfo[i] == '\\' && i+1 < len(conninfo) {
-					i += 2
-					continue
-				}
-				if conninfo[i] == '\'' {
-					i++
-					break
-				}
-				i++
-			}
-		} else {
-			for i < len(conninfo) && !isSpace(conninfo[i]) {
-				if conninfo[i] == '\\' && i+1 < len(conninfo) {
-					i++
-				}
-				i++
-			}
-		}
+		i = scanConninfoValue(conninfo, i)
 		if key == "dbname" {
 			start, end, ok = valStart, i, true // keep scanning: last wins
 		}
 	}
 	return start, end, ok
+}
+
+// skipConninfoSpace returns the index of the first non-whitespace byte in
+// conninfo at or after i, skipping the separator between key=value pairs.
+func skipConninfoSpace(conninfo string, i int) int {
+	for i < len(conninfo) && isConninfoSpace(conninfo[i]) {
+		i++
+	}
+	return i
+}
+
+// scanConninfoKey scans a bare key token starting at i, which must not be
+// whitespace, stopping at the next '=' or whitespace. It returns the key
+// text and the index immediately after it.
+func scanConninfoKey(conninfo string, i int) (key string, next int) {
+	keyStart := i
+	for i < len(conninfo) && conninfo[i] != '=' && !isConninfoSpace(conninfo[i]) {
+		i++
+	}
+	return conninfo[keyStart:i], i
+}
+
+// scanConninfoValue scans a value starting at i, immediately after the '=',
+// dispatching to the quoted or bare scanner depending on the value's first
+// byte. It returns the index immediately after the value.
+func scanConninfoValue(conninfo string, i int) (end int) {
+	if i < len(conninfo) && conninfo[i] == '\'' {
+		return scanQuotedConninfoValue(conninfo, i)
+	}
+	return scanBareConninfoValue(conninfo, i)
+}
+
+// scanQuotedConninfoValue scans a single-quoted value starting at the
+// opening quote, honoring backslash escapes, and returns the index
+// immediately after the closing quote (or the end of the string, if the
+// quote is never closed).
+func scanQuotedConninfoValue(conninfo string, i int) int {
+	i++ // opening quote
+	for i < len(conninfo) {
+		if conninfo[i] == '\\' && i+1 < len(conninfo) {
+			i += 2
+			continue
+		}
+		if conninfo[i] == '\'' {
+			i++ // closing quote
+			break
+		}
+		i++
+	}
+	return i
+}
+
+// scanBareConninfoValue scans an unquoted value starting at i, stopping at
+// the next whitespace byte, and returns the index immediately after it.
+func scanBareConninfoValue(conninfo string, i int) int {
+	for i < len(conninfo) && !isConninfoSpace(conninfo[i]) {
+		if conninfo[i] == '\\' && i+1 < len(conninfo) {
+			i++
+		}
+		i++
+	}
+	return i
+}
+
+func isConninfoSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // The gated tests below deliberately use context.Background(), not
@@ -422,28 +465,40 @@ func TestStatus_ReportsAppliedPendingSplit(t *testing.T) {
 		t.Fatalf("len(statuses) = %d, want 3", len(statuses))
 	}
 
-	want := []struct {
-		version int64
-		applied bool
-	}{
-		{1, true},
-		{2, true},
-		{3, false},
+	want := []migrationStatusExpectation{
+		{version: 1, applied: true},
+		{version: 2, applied: true},
+		{version: 3, applied: false},
 	}
 	for i, w := range want {
-		got := statuses[i]
-		if got.Version != w.version {
-			t.Errorf("statuses[%d].Version = %d, want %d", i, got.Version, w.version)
-		}
-		if got.Applied != w.applied {
-			t.Errorf("statuses[%d].Applied = %v, want %v", i, got.Applied, w.applied)
-		}
-		if w.applied && got.AppliedAt.IsZero() {
-			t.Errorf("statuses[%d].AppliedAt is zero, want a timestamp", i)
-		}
-		if !w.applied && !got.AppliedAt.IsZero() {
-			t.Errorf("statuses[%d].AppliedAt = %v, want zero (pending)", i, got.AppliedAt)
-		}
+		assertMigrationStatus(t, i, statuses[i], w)
+	}
+}
+
+// migrationStatusExpectation is one row of TestStatus_ReportsAppliedPendingSplit's
+// expected table: the version's applied/pending state, checked against a
+// live MigrationStatus by assertMigrationStatus.
+type migrationStatusExpectation struct {
+	version int64
+	applied bool
+}
+
+// assertMigrationStatus checks a single MigrationStatus against its
+// expectation, reporting index i on failure so a mismatch names the row
+// that produced it.
+func assertMigrationStatus(t *testing.T, i int, got MigrationStatus, want migrationStatusExpectation) {
+	t.Helper()
+	if got.Version != want.version {
+		t.Errorf("statuses[%d].Version = %d, want %d", i, got.Version, want.version)
+	}
+	if got.Applied != want.applied {
+		t.Errorf("statuses[%d].Applied = %v, want %v", i, got.Applied, want.applied)
+	}
+	if want.applied && got.AppliedAt.IsZero() {
+		t.Errorf("statuses[%d].AppliedAt is zero, want a timestamp", i)
+	}
+	if !want.applied && !got.AppliedAt.IsZero() {
+		t.Errorf("statuses[%d].AppliedAt = %v, want zero (pending)", i, got.AppliedAt)
 	}
 }
 
