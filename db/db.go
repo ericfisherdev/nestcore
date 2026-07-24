@@ -57,7 +57,9 @@ func New(ctx context.Context, cfg config.DBConfig) (*pgxpool.Pool, error) {
 
 	// A non-positive ConnTimeout means "no explicit bound" (inherit ctx) rather
 	// than an already-expired deadline that would fail the ping immediately.
-	pingCtx, cancel := ctx, func() {}
+	pingCtx, cancel := ctx, func() {
+		// No-op cancel: the inherited-context path has no timer to release.
+	}
 	if cfg.ConnTimeout > 0 {
 		pingCtx, cancel = context.WithTimeout(ctx, cfg.ConnTimeout)
 	}
