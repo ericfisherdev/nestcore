@@ -71,29 +71,40 @@ func Recoverer(logger *slog.Logger) Middleware {
 				rw = &responseWriter{ResponseWriter: w}
 			}
 
-			defer func() {
-				if rec := recover(); rec != nil {
-					// http.ErrAbortHandler is the documented way to abort a
-					// handler; propagate it instead of treating it as a 500.
-					if rec == http.ErrAbortHandler {
-						panic(rec)
-					}
-					logger.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
-						slog.Any("panic", rec),
-						slog.String("request_id", RequestIDFromContext(r.Context())),
-						slog.String("stack", string(debug.Stack())),
-					)
-					// Write a 500 only if no response has started; otherwise the
-					// status/headers are already sent (or the connection was
-					// hijacked) and writing would corrupt the response.
-					if !rw.wroteHeader {
-						rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
-						rw.WriteHeader(http.StatusInternalServerError)
-						_, _ = rw.Write([]byte("internal server error"))
-					}
-				}
-			}()
+			// Deferred directly (not wrapped in a closure): recover only takes
+			// effect when called directly by the deferred function itself, so
+			// wrapping this call would let the panic escape uncaught.
+			defer recoverAndRespond(logger, rw, r)
 			next.ServeHTTP(rw, r)
 		})
+	}
+}
+
+// recoverAndRespond is Recoverer's deferred recover body, lifted out to keep
+// Recoverer's cognitive complexity within the allowed limit. It must stay
+// deferred directly by its caller rather than from within a wrapping
+// closure — see the comment at the call site.
+func recoverAndRespond(logger *slog.Logger, rw *responseWriter, r *http.Request) {
+	rec := recover()
+	if rec == nil {
+		return
+	}
+	// http.ErrAbortHandler is the documented way to abort a handler;
+	// propagate it instead of treating it as a 500.
+	if rec == http.ErrAbortHandler {
+		panic(rec)
+	}
+	logger.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
+		slog.Any("panic", rec),
+		slog.String("request_id", RequestIDFromContext(r.Context())),
+		slog.String("stack", string(debug.Stack())),
+	)
+	// Write a 500 only if no response has started; otherwise the
+	// status/headers are already sent (or the connection was hijacked) and
+	// writing would corrupt the response.
+	if !rw.wroteHeader {
+		rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		rw.WriteHeader(http.StatusInternalServerError)
+		_, _ = rw.Write([]byte("internal server error"))
 	}
 }

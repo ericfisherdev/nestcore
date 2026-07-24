@@ -292,49 +292,71 @@ func rewriteDatabase(envVar, baseDSN, newName string) (string, error) {
 func dbnameValueSpan(conninfo string) (start, end int, ok bool) {
 	i := 0
 	for i < len(conninfo) {
-		// Skip whitespace between key=value pairs.
-		for i < len(conninfo) && isConninfoSpace(conninfo[i]) {
-			i++
-		}
+		i = skipConninfoSpace(conninfo, i)
 		if i >= len(conninfo) {
 			break
 		}
-		keyStart := i
-		for i < len(conninfo) && conninfo[i] != '=' && !isConninfoSpace(conninfo[i]) {
-			i++
-		}
-		key := conninfo[keyStart:i]
+		key, next := scanConninfoKey(conninfo, i)
+		i = next
 		if i >= len(conninfo) || conninfo[i] != '=' {
 			continue // malformed fragment; let pgx report it
 		}
 		i++ // consume '='
 		valStart := i
-		if i < len(conninfo) && conninfo[i] == '\'' {
-			i++ // opening quote
-			for i < len(conninfo) {
-				if conninfo[i] == '\\' && i+1 < len(conninfo) {
-					i += 2
-					continue
-				}
-				if conninfo[i] == '\'' {
-					i++ // closing quote
-					break
-				}
-				i++
-			}
-		} else {
-			for i < len(conninfo) && !isConninfoSpace(conninfo[i]) {
-				if conninfo[i] == '\\' && i+1 < len(conninfo) {
-					i++
-				}
-				i++
-			}
-		}
+		i = scanConninfoValue(conninfo, i)
 		if key == "dbname" {
 			start, end, ok = valStart, i, true // keep scanning: last wins
 		}
 	}
 	return start, end, ok
+}
+
+// skipConninfoSpace returns the index of the first non-whitespace byte in
+// conninfo at or after i, skipping the separator between key=value pairs.
+func skipConninfoSpace(conninfo string, i int) int {
+	for i < len(conninfo) && isConninfoSpace(conninfo[i]) {
+		i++
+	}
+	return i
+}
+
+// scanConninfoKey scans a bare key token starting at i, which must not be
+// whitespace, stopping at the next '=' or whitespace. It returns the key
+// text and the index immediately after it.
+func scanConninfoKey(conninfo string, i int) (key string, next int) {
+	keyStart := i
+	for i < len(conninfo) && conninfo[i] != '=' && !isConninfoSpace(conninfo[i]) {
+		i++
+	}
+	return conninfo[keyStart:i], i
+}
+
+// scanConninfoValue scans a value starting at i, immediately after the '=',
+// handling both the quoted form ('...' with backslash escapes) and the bare
+// unquoted form. It returns the index immediately after the value.
+func scanConninfoValue(conninfo string, i int) (end int) {
+	if i < len(conninfo) && conninfo[i] == '\'' {
+		i++ // opening quote
+		for i < len(conninfo) {
+			if conninfo[i] == '\\' && i+1 < len(conninfo) {
+				i += 2
+				continue
+			}
+			if conninfo[i] == '\'' {
+				i++ // closing quote
+				break
+			}
+			i++
+		}
+		return i
+	}
+	for i < len(conninfo) && !isConninfoSpace(conninfo[i]) {
+		if conninfo[i] == '\\' && i+1 < len(conninfo) {
+			i++
+		}
+		i++
+	}
+	return i
 }
 
 func isConninfoSpace(c byte) bool {
