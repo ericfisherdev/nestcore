@@ -43,7 +43,7 @@ func doRequest(t *testing.T, ready httpserver.ReadinessFunc, path string) *httpt
 // server echoes a request id even on the simple health route.
 func TestRequestIDHeader(t *testing.T) {
 	rec := doRequest(t, nil, "/healthz")
-	if got := rec.Header().Get("X-Request-Id"); got == "" {
+	if rec.Header().Get("X-Request-Id") == "" {
 		t.Error("X-Request-Id header missing; request-id middleware not applied")
 	}
 }
