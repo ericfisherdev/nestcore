@@ -332,24 +332,38 @@ func scanConninfoKey(conninfo string, i int) (key string, next int) {
 }
 
 // scanConninfoValue scans a value starting at i, immediately after the '=',
-// handling both the quoted form ('...' with backslash escapes) and the bare
-// unquoted form. It returns the index immediately after the value.
+// dispatching to the quoted or bare scanner depending on the value's first
+// byte. It returns the index immediately after the value.
 func scanConninfoValue(conninfo string, i int) (end int) {
 	if i < len(conninfo) && conninfo[i] == '\'' {
-		i++ // opening quote
-		for i < len(conninfo) {
-			if conninfo[i] == '\\' && i+1 < len(conninfo) {
-				i += 2
-				continue
-			}
-			if conninfo[i] == '\'' {
-				i++ // closing quote
-				break
-			}
-			i++
-		}
-		return i
+		return scanQuotedConninfoValue(conninfo, i)
 	}
+	return scanBareConninfoValue(conninfo, i)
+}
+
+// scanQuotedConninfoValue scans a single-quoted value starting at the
+// opening quote, honoring backslash escapes, and returns the index
+// immediately after the closing quote (or the end of the string, if the
+// quote is never closed).
+func scanQuotedConninfoValue(conninfo string, i int) int {
+	i++ // opening quote
+	for i < len(conninfo) {
+		if conninfo[i] == '\\' && i+1 < len(conninfo) {
+			i += 2
+			continue
+		}
+		if conninfo[i] == '\'' {
+			i++ // closing quote
+			break
+		}
+		i++
+	}
+	return i
+}
+
+// scanBareConninfoValue scans an unquoted value starting at i, stopping at
+// the next whitespace byte, and returns the index immediately after it.
+func scanBareConninfoValue(conninfo string, i int) int {
 	for i < len(conninfo) && !isConninfoSpace(conninfo[i]) {
 		if conninfo[i] == '\\' && i+1 < len(conninfo) {
 			i++
