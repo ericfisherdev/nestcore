@@ -161,60 +161,64 @@ func TestServerConfigValidate(t *testing.T) {
 	}
 }
 
-func TestTrustedProxies(t *testing.T) {
-	t.Run("unset defaults to loopback", func(t *testing.T) {
-		setEnv(t, nil)
-		_ = os.Unsetenv("TRUSTED_PROXIES")
-		cfg, errs := config.LoadServer()
-		if len(errs) > 0 {
-			t.Fatalf("LoadServer() unexpected errors: %v", errs)
-		}
-		if cfg.TrustedProxies != "127.0.0.0/8,::1/128" {
-			t.Errorf("TrustedProxies = %q, want the loopback default", cfg.TrustedProxies)
-		}
-		if got := cfg.TrustedProxyPrefixes(); len(got) != 2 {
-			t.Errorf("TrustedProxyPrefixes() len = %d, want 2", len(got))
-		}
-	})
+// TestTrustedProxies is split into one top-level function per scenario
+// (rather than t.Run subtests sharing one function): the default, the
+// explicit-empty override, prefix parsing, and Validate's reporting are
+// unrelated concerns, so splitting keeps cognitive complexity low without
+// forcing them into an artificial input/expected table.
 
-	t.Run("explicit empty trusts nothing", func(t *testing.T) {
-		setEnv(t, map[string]string{"TRUSTED_PROXIES": ""})
-		cfg, errs := config.LoadServer()
-		if len(errs) > 0 {
-			t.Fatalf("LoadServer() unexpected errors: %v", errs)
-		}
-		if cfg.TrustedProxies != "" {
-			t.Errorf("TrustedProxies = %q, want empty", cfg.TrustedProxies)
-		}
-		if got := cfg.TrustedProxyPrefixes(); len(got) != 0 {
-			t.Errorf("TrustedProxyPrefixes() len = %d, want 0 (trust nothing)", len(got))
-		}
-	})
+func TestTrustedProxies_UnsetDefaultsToLoopback(t *testing.T) {
+	setEnv(t, nil)
+	_ = os.Unsetenv("TRUSTED_PROXIES")
+	cfg, errs := config.LoadServer()
+	if len(errs) > 0 {
+		t.Fatalf("LoadServer() unexpected errors: %v", errs)
+	}
+	if cfg.TrustedProxies != "127.0.0.0/8,::1/128" {
+		t.Errorf("TrustedProxies = %q, want the loopback default", cfg.TrustedProxies)
+	}
+	if got := cfg.TrustedProxyPrefixes(); len(got) != 2 {
+		t.Errorf("TrustedProxyPrefixes() len = %d, want 2", len(got))
+	}
+}
 
-	t.Run("prefixes are parsed and masked", func(t *testing.T) {
-		setEnv(t, map[string]string{"TRUSTED_PROXIES": "192.168.1.5/24, ::1/128"})
-		cfg, errs := config.LoadServer()
-		if len(errs) > 0 {
-			t.Fatalf("LoadServer() unexpected errors: %v", errs)
-		}
-		want := []netip.Prefix{
-			netip.MustParsePrefix("192.168.1.0/24"), // host bits masked off
-			netip.MustParsePrefix("::1/128"),
-		}
-		if got := cfg.TrustedProxyPrefixes(); !reflect.DeepEqual(got, want) {
-			t.Errorf("TrustedProxyPrefixes() = %v, want %v", got, want)
-		}
-	})
+func TestTrustedProxies_ExplicitEmptyTrustsNothing(t *testing.T) {
+	setEnv(t, map[string]string{"TRUSTED_PROXIES": ""})
+	cfg, errs := config.LoadServer()
+	if len(errs) > 0 {
+		t.Fatalf("LoadServer() unexpected errors: %v", errs)
+	}
+	if cfg.TrustedProxies != "" {
+		t.Errorf("TrustedProxies = %q, want empty", cfg.TrustedProxies)
+	}
+	if got := cfg.TrustedProxyPrefixes(); len(got) != 0 {
+		t.Errorf("TrustedProxyPrefixes() len = %d, want 0 (trust nothing)", len(got))
+	}
+}
 
-	t.Run("malformed CIDR is reported by Validate", func(t *testing.T) {
-		setEnv(t, map[string]string{"TRUSTED_PROXIES": "127.0.0.0/8, not-a-cidr"})
-		cfg, errs := config.LoadServer()
-		if len(errs) > 0 {
-			t.Fatalf("LoadServer() unexpected errors: %v", errs)
-		}
-		joined := errsToString(cfg.Validate())
-		if !contains(joined, "TRUSTED_PROXIES") || !contains(joined, "not-a-cidr") {
-			t.Errorf("Validate() = %q, want it to name TRUSTED_PROXIES and the bad entry", joined)
-		}
-	})
+func TestTrustedProxies_PrefixesAreParsedAndMasked(t *testing.T) {
+	setEnv(t, map[string]string{"TRUSTED_PROXIES": "192.168.1.5/24, ::1/128"})
+	cfg, errs := config.LoadServer()
+	if len(errs) > 0 {
+		t.Fatalf("LoadServer() unexpected errors: %v", errs)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("192.168.1.0/24"), // host bits masked off
+		netip.MustParsePrefix("::1/128"),
+	}
+	if got := cfg.TrustedProxyPrefixes(); !reflect.DeepEqual(got, want) {
+		t.Errorf("TrustedProxyPrefixes() = %v, want %v", got, want)
+	}
+}
+
+func TestTrustedProxies_MalformedCIDRIsReportedByValidate(t *testing.T) {
+	setEnv(t, map[string]string{"TRUSTED_PROXIES": "127.0.0.0/8, not-a-cidr"})
+	cfg, errs := config.LoadServer()
+	if len(errs) > 0 {
+		t.Fatalf("LoadServer() unexpected errors: %v", errs)
+	}
+	joined := errsToString(cfg.Validate())
+	if !contains(joined, "TRUSTED_PROXIES") || !contains(joined, "not-a-cidr") {
+		t.Errorf("Validate() = %q, want it to name TRUSTED_PROXIES and the bad entry", joined)
+	}
 }

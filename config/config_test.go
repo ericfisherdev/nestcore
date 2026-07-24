@@ -50,50 +50,56 @@ func TestServerAddrFromEnv(t *testing.T) {
 	})
 }
 
-func TestLoadDotenv(t *testing.T) {
-	t.Run("missing .env is not an error", func(t *testing.T) {
-		setEnv(t, map[string]string{})
-		if errs := config.LoadDotenv(); errs != nil {
-			t.Errorf("LoadDotenv() = %v, want nil", errs)
-		}
-	})
-	t.Run("valid .env sets an unset variable", func(t *testing.T) {
-		setEnv(t, map[string]string{})
-		if err := os.WriteFile(".env", []byte("NESTCORE_TEST_DOTENV=from-file\n"), 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		t.Setenv("NESTCORE_TEST_DOTENV", "")
-		_ = os.Unsetenv("NESTCORE_TEST_DOTENV")
-		if errs := config.LoadDotenv(); errs != nil {
-			t.Fatalf("LoadDotenv() = %v, want nil", errs)
-		}
-		if got := os.Getenv("NESTCORE_TEST_DOTENV"); got != "from-file" {
-			t.Errorf("NESTCORE_TEST_DOTENV = %q, want from-file", got)
-		}
-	})
-	t.Run("real environment wins over .env", func(t *testing.T) {
-		setEnv(t, map[string]string{})
-		if err := os.WriteFile(".env", []byte("NESTCORE_TEST_DOTENV=from-file\n"), 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		t.Setenv("NESTCORE_TEST_DOTENV", "from-environment")
-		if errs := config.LoadDotenv(); errs != nil {
-			t.Fatalf("LoadDotenv() = %v, want nil", errs)
-		}
-		if got := os.Getenv("NESTCORE_TEST_DOTENV"); got != "from-environment" {
-			t.Errorf("NESTCORE_TEST_DOTENV = %q, want the real environment to win", got)
-		}
-	})
-	t.Run("malformed .env is surfaced", func(t *testing.T) {
-		setEnv(t, map[string]string{})
-		if err := os.WriteFile(".env", []byte(`FOO="unterminated`), 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		errs := config.LoadDotenv()
-		if len(errs) == 0 {
-			t.Fatal("LoadDotenv() = nil, want an error for a malformed .env")
-		}
-	})
+// TestLoadDotenv is split into one top-level function per scenario (rather
+// than t.Run subtests sharing one function) because each covers an
+// unrelated concern of LoadDotenv's contract — keeping cognitive complexity
+// low without collapsing the cases into an artificial input/expected table.
+
+func TestLoadDotenv_MissingFileIsNotAnError(t *testing.T) {
+	setEnv(t, map[string]string{})
+	if errs := config.LoadDotenv(); errs != nil {
+		t.Errorf("LoadDotenv() = %v, want nil", errs)
+	}
+}
+
+func TestLoadDotenv_ValidFileSetsUnsetVariable(t *testing.T) {
+	setEnv(t, map[string]string{})
+	if err := os.WriteFile(".env", []byte("NESTCORE_TEST_DOTENV=from-file\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("NESTCORE_TEST_DOTENV", "")
+	_ = os.Unsetenv("NESTCORE_TEST_DOTENV")
+	if errs := config.LoadDotenv(); errs != nil {
+		t.Fatalf("LoadDotenv() = %v, want nil", errs)
+	}
+	if got := os.Getenv("NESTCORE_TEST_DOTENV"); got != "from-file" {
+		t.Errorf("NESTCORE_TEST_DOTENV = %q, want from-file", got)
+	}
+}
+
+func TestLoadDotenv_RealEnvironmentWins(t *testing.T) {
+	setEnv(t, map[string]string{})
+	if err := os.WriteFile(".env", []byte("NESTCORE_TEST_DOTENV=from-file\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("NESTCORE_TEST_DOTENV", "from-environment")
+	if errs := config.LoadDotenv(); errs != nil {
+		t.Fatalf("LoadDotenv() = %v, want nil", errs)
+	}
+	if got := os.Getenv("NESTCORE_TEST_DOTENV"); got != "from-environment" {
+		t.Errorf("NESTCORE_TEST_DOTENV = %q, want the real environment to win", got)
+	}
+}
+
+func TestLoadDotenv_MalformedEnvIsSurfaced(t *testing.T) {
+	setEnv(t, map[string]string{})
+	if err := os.WriteFile(".env", []byte(`FOO="unterminated`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	errs := config.LoadDotenv()
+	if len(errs) == 0 {
+		t.Fatal("LoadDotenv() = nil, want an error for a malformed .env")
+	}
 }
 
 // appConfig mirrors the shape of an application's own root configuration
@@ -183,56 +189,60 @@ func composeAppConfig(s3Enabled bool) (appConfig, []error) {
 	}, errs
 }
 
-func TestComposeAppShapedConfig(t *testing.T) {
-	t.Run("a valid dev deployment composes with no errors", func(t *testing.T) {
-		setEnv(t, map[string]string{})
-		got, errs := composeAppConfig(false)
-		if len(errs) > 0 {
-			t.Fatalf("composeAppConfig() unexpected errors: %v", errs)
-		}
-		if got.Env != config.EnvDev {
-			t.Errorf("Env = %q, want %q", got.Env, config.EnvDev)
-		}
-		if got.DB.DSN == "" {
-			t.Error("DB.DSN is empty, want the app's own dev fallback to have applied")
-		}
-	})
+// TestComposeAppShapedConfig is split into one top-level function per
+// deployment scenario (rather than t.Run subtests sharing one function)
+// since dev, prod, the S3 gating decision, and cross-config aggregation are
+// unrelated concerns — splitting keeps cognitive complexity low without
+// forcing them into an artificial input/expected table.
 
-	t.Run("a valid prod deployment composes with no errors", func(t *testing.T) {
-		setEnv(t, map[string]string{
-			"APP_ENV":        config.EnvProd,
-			"DATABASE_URL":   "postgres://u:p@db:5432/app",
-			"SESSION_SECRET": strings.Repeat("a", 32),
-			"ENCRYPTION_KEY": validEncryptionKey,
-		})
-		_, errs := composeAppConfig(false)
-		if len(errs) > 0 {
-			t.Fatalf("composeAppConfig() unexpected errors: %v", errs)
-		}
-	})
+func TestComposeAppShapedConfig_ValidDevDeploymentComposes(t *testing.T) {
+	setEnv(t, map[string]string{})
+	got, errs := composeAppConfig(false)
+	if len(errs) > 0 {
+		t.Fatalf("composeAppConfig() unexpected errors: %v", errs)
+	}
+	if got.Env != config.EnvDev {
+		t.Errorf("Env = %q, want %q", got.Env, config.EnvDev)
+	}
+	if got.DB.DSN == "" {
+		t.Error("DB.DSN is empty, want the app's own dev fallback to have applied")
+	}
+}
 
-	t.Run("s3 findings are gated on the caller's own selection", func(t *testing.T) {
-		setEnv(t, map[string]string{"S3_ACCESS_KEY_ID": "minioadmin"}) // partial, invalid if it counted
-		if _, errs := composeAppConfig(false); len(errs) > 0 {
-			t.Fatalf("composeAppConfig(s3Enabled=false) unexpected errors: %v", errs)
-		}
-		if _, errs := composeAppConfig(true); len(errs) == 0 {
-			t.Fatal("composeAppConfig(s3Enabled=true) = no errors, want the partial S3 credentials to be reported")
-		}
+func TestComposeAppShapedConfig_ValidProdDeploymentComposes(t *testing.T) {
+	setEnv(t, map[string]string{
+		"APP_ENV":        config.EnvProd,
+		"DATABASE_URL":   "postgres://u:p@db:5432/app",
+		"SESSION_SECRET": strings.Repeat("a", 32),
+		"ENCRYPTION_KEY": validEncryptionKey,
 	})
+	_, errs := composeAppConfig(false)
+	if len(errs) > 0 {
+		t.Fatalf("composeAppConfig() unexpected errors: %v", errs)
+	}
+}
 
-	t.Run("aggregates problems across every sub-config in one pass", func(t *testing.T) {
-		setEnv(t, map[string]string{
-			"APP_ENV":        "staging",
-			"DB_MAX_CONNS":   "nope",
-			"SESSION_SECRET": "x",
-		})
-		_, errs := composeAppConfig(false)
-		joined := errsToString(errs)
-		for _, want := range []string{"APP_ENV", "DB_MAX_CONNS", "SESSION_SECRET"} {
-			if !contains(joined, want) {
-				t.Errorf("composeAppConfig() errors = %q, want it to contain %q", joined, want)
-			}
-		}
+func TestComposeAppShapedConfig_S3FindingsGatedOnSelection(t *testing.T) {
+	setEnv(t, map[string]string{"S3_ACCESS_KEY_ID": "minioadmin"}) // partial, invalid if it counted
+	if _, errs := composeAppConfig(false); len(errs) > 0 {
+		t.Fatalf("composeAppConfig(s3Enabled=false) unexpected errors: %v", errs)
+	}
+	if _, errs := composeAppConfig(true); len(errs) == 0 {
+		t.Fatal("composeAppConfig(s3Enabled=true) = no errors, want the partial S3 credentials to be reported")
+	}
+}
+
+func TestComposeAppShapedConfig_AggregatesAcrossSubConfigs(t *testing.T) {
+	setEnv(t, map[string]string{
+		"APP_ENV":        "staging",
+		"DB_MAX_CONNS":   "nope",
+		"SESSION_SECRET": "x",
 	})
+	_, errs := composeAppConfig(false)
+	joined := errsToString(errs)
+	for _, want := range []string{"APP_ENV", "DB_MAX_CONNS", "SESSION_SECRET"} {
+		if !contains(joined, want) {
+			t.Errorf("composeAppConfig() errors = %q, want it to contain %q", joined, want)
+		}
+	}
 }
