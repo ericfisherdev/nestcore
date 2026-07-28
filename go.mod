@@ -11,7 +11,7 @@ tool (
 // modules cannot drift apart mid-migration.
 require (
 	github.com/a-h/templ v0.3.1001
-	github.com/dgraph-io/badger/v4 v4.9.4
+	github.com/dgraph-io/badger/v4 v4.9.5
 	github.com/joho/godotenv v1.5.1
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.23.2
