@@ -10,7 +10,7 @@ tool (
 // Pinned at the exact versions Nestova pins today (NSTR-3), so the two
 // modules cannot drift apart mid-migration.
 require (
-	github.com/a-h/templ v0.3.1001
+	github.com/a-h/templ v0.3.1020
 	github.com/dgraph-io/badger/v4 v4.9.5
 	github.com/joho/godotenv v1.5.1
 	github.com/pquerna/otp v1.5.0
