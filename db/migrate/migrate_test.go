@@ -59,50 +59,51 @@ func TestNew(t *testing.T) {
 // TestNew_ConstructionOptions verifies WithVersionTable, WithEnsureSchema,
 // and WithSessionLock each set their corresponding Runner field, and that a
 // Runner built with none of them (every existing caller's call pattern)
-// leaves all three at their zero value.
+// leaves all three at their zero value. Table-driven since all four cases
+// share the same shape: apply some options, assert the three fields.
 func TestNew_ConstructionOptions(t *testing.T) {
-	t.Run("no options leaves every field at its zero value", func(t *testing.T) {
-		r := newFixtureRunner(t)
-		if r.versionTable != "" {
-			t.Errorf("versionTable = %q, want empty", r.versionTable)
-		}
-		if r.ensureSchema != "" {
-			t.Errorf("ensureSchema = %q, want empty", r.ensureSchema)
-		}
-		if r.sessionLock {
-			t.Error("sessionLock = true, want false")
-		}
-	})
+	tests := []struct {
+		name        string
+		opts        []NewOption
+		wantVersion string
+		wantSchema  string
+		wantSession bool
+	}{
+		{name: "no options leaves every field at its zero value"},
+		{
+			name:        "WithVersionTable sets versionTable",
+			opts:        []NewOption{WithVersionTable("identity.goose_db_version")},
+			wantVersion: "identity.goose_db_version",
+		},
+		{
+			name:       "WithEnsureSchema sets ensureSchema",
+			opts:       []NewOption{WithEnsureSchema("identity")},
+			wantSchema: "identity",
+		},
+		{
+			name:        "WithSessionLock sets sessionLock",
+			opts:        []NewOption{WithSessionLock()},
+			wantSession: true,
+		},
+	}
 
-	t.Run("WithVersionTable sets versionTable", func(t *testing.T) {
-		r, err := New(fixtureFS, fixtureDir, WithVersionTable("identity.goose_db_version"))
-		if err != nil {
-			t.Fatalf("New() error: %v", err)
-		}
-		if r.versionTable != "identity.goose_db_version" {
-			t.Errorf("versionTable = %q, want %q", r.versionTable, "identity.goose_db_version")
-		}
-	})
-
-	t.Run("WithEnsureSchema sets ensureSchema", func(t *testing.T) {
-		r, err := New(fixtureFS, fixtureDir, WithEnsureSchema("identity"))
-		if err != nil {
-			t.Fatalf("New() error: %v", err)
-		}
-		if r.ensureSchema != "identity" {
-			t.Errorf("ensureSchema = %q, want %q", r.ensureSchema, "identity")
-		}
-	})
-
-	t.Run("WithSessionLock sets sessionLock", func(t *testing.T) {
-		r, err := New(fixtureFS, fixtureDir, WithSessionLock())
-		if err != nil {
-			t.Fatalf("New() error: %v", err)
-		}
-		if !r.sessionLock {
-			t.Error("sessionLock = false, want true")
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := New(fixtureFS, fixtureDir, tt.opts...)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			if r.versionTable != tt.wantVersion {
+				t.Errorf("versionTable = %q, want %q", r.versionTable, tt.wantVersion)
+			}
+			if r.ensureSchema != tt.wantSchema {
+				t.Errorf("ensureSchema = %q, want %q", r.ensureSchema, tt.wantSchema)
+			}
+			if r.sessionLock != tt.wantSession {
+				t.Errorf("sessionLock = %v, want %v", r.sessionLock, tt.wantSession)
+			}
+		})
+	}
 }
 
 // TestPoolerSafeConnConfig verifies the pooler-safe path selects the simple
