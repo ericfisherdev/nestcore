@@ -9,6 +9,25 @@
 -- goose's Provider is built; it stays here too so this migration set is
 -- self-sufficient run standalone (e.g. a bare goose invocation, or the
 -- gated tests in this package), not only when constructed through New.
+--
+-- Whichever role runs this first OWNS the identity schema. No GRANTs are
+-- issued here, so both apps must connect as the same role (see
+-- identity/migrate's package doc, Migration ownership).
+--
+-- ADOPTING NESTORAGE'S INTERIM SCHEMA: this set may run against a database
+-- where Nestorage's own internal/platform/db/migrate/migrations/00017_identity_schema.sql
+-- (merged, on Nestorage's main) already created identity.household,
+-- identity.member, identity.sessions and identity_sessions_expiry_idx —
+-- guarded with IF NOT EXISTS on purpose, per that migration's own header,
+-- specifically so this set could adopt it without conflict. Every CREATE
+-- below is therefore IF NOT EXISTS too, and identity.member is reconciled
+-- immediately after in case it was Nestorage's shape rather than this
+-- migration's own: Nestorage's interim member has email/password_hash as
+-- NOT NULL with no member_credentials_complete CHECK, and neither
+-- member_household_name_uniq nor member_household_id_id_uniq — both of
+-- which 00002's member_mfa_member_fk and 00003's member_credential_member_fk
+-- require as composite-FK targets. The ALTER/DROP+ADD statements below are
+-- no-ops when this migration's own CREATE TABLE ran instead.
 CREATE SCHEMA IF NOT EXISTS identity;
 
 -- pgcrypto (gen_random_uuid, below) and citext (member.email) are installed
@@ -20,7 +39,7 @@ CREATE SCHEMA IF NOT EXISTS identity;
 CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;
 
-CREATE TABLE identity.household (
+CREATE TABLE IF NOT EXISTS identity.household (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name       text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -48,7 +67,7 @@ CREATE TABLE identity.household (
 -- package doc for the full deactivation-not-deletion and
 -- app-side-presentation policies this table falls under. The operations and
 -- guards that consume this flag ship in NSTR-111, not here.
-CREATE TABLE identity.member (
+CREATE TABLE IF NOT EXISTS identity.member (
     id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     household_id  uuid        NOT NULL REFERENCES identity.household (id) ON DELETE CASCADE,
     display_name  text        NOT NULL,
@@ -67,13 +86,30 @@ CREATE TABLE identity.member (
         OR (email IS NOT NULL AND password_hash IS NOT NULL)
     )
 );
+
+-- Reconcile an identity.member adopted from Nestorage's interim
+-- 00017_identity_schema.sql, whose shape predates this set: credentials are
+-- NOT NULL there and it carries neither uniqueness index below. Every
+-- statement here no-ops on the freshly created table above.
+ALTER TABLE identity.member
+    ALTER COLUMN email         DROP NOT NULL,
+    ALTER COLUMN password_hash DROP NOT NULL;
+
+ALTER TABLE identity.member
+    DROP CONSTRAINT IF EXISTS member_credentials_complete;
+ALTER TABLE identity.member
+    ADD CONSTRAINT member_credentials_complete CHECK (
+        (email IS NULL AND password_hash IS NULL)
+        OR (email IS NOT NULL AND password_hash IS NOT NULL)
+    );
+
 -- Member display names are unique (case-insensitively) within a household.
-CREATE UNIQUE INDEX member_household_name_uniq ON identity.member (household_id, lower(display_name));
+CREATE UNIQUE INDEX IF NOT EXISTS member_household_name_uniq ON identity.member (household_id, lower(display_name));
 -- Composite-FK target for tenant consistency: every table below that
 -- references a member alongside its household (member_mfa,
 -- member_credential, ...) checks the member actually belongs to that
 -- household through this.
-CREATE UNIQUE INDEX member_household_id_id_uniq ON identity.member (household_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS member_household_id_id_uniq ON identity.member (household_id, id);
 
 -- +goose Down
 DROP TABLE IF EXISTS identity.member;

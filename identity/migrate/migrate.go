@@ -18,6 +18,15 @@
 // RequireVersion with the version it was built against, refusing to boot
 // against an identity schema older than that.
 //
+// Operator prerequisite: both apps must reach this schema as the SAME
+// Postgres role, or the identity schema must be created and granted out of
+// band before either boots. New creates the schema implicitly (CREATE SCHEMA
+// IF NOT EXISTS) as whichever role connects first, and that role owns it;
+// this package issues no GRANTs, so a second app connecting as a different
+// role fails on goose's own CREATE TABLE IF NOT EXISTS
+// identity.goose_db_version with "permission denied for schema identity",
+// before any migration here runs.
+//
 // This forces an ADDITIVE-ONLY discipline on every migration in this
 // package: whichever app deploys first migrates identity forward, and the
 // other app — built against the older schema — must keep working against
@@ -79,7 +88,9 @@ const schemaName = "identity"
 // goose never fails creating that version table against a schema that does
 // not exist yet on a fresh database), and a session-level advisory lock —
 // see the package doc's Migration ownership section for why all three are
-// required here specifically.
+// required here specifically. RequireVersion deliberately builds its own
+// Runner rather than calling New, to leave the session lock out — see its
+// own doc comment.
 func New() (*dbmigrate.Runner, error) {
 	return dbmigrate.New(migrationsFS, "migrations",
 		dbmigrate.WithVersionTable(versionTable),
@@ -94,7 +105,19 @@ func New() (*dbmigrate.Runner, error) {
 // A newer-than-built schema is explicitly allowed: that is what the
 // additive-only discipline documented in the package doc pays for.
 func RequireVersion(ctx context.Context, dsn string, minVersion int64) error {
-	r, err := New()
+	// Deliberately NOT New(): this is a read-only check, and Runner.Status
+	// (goose's Provider.Status) acquires the configured session lock via
+	// initialize(ctx, true) — verified against goose v3.27.3's source, where
+	// only HasPending/GetVersions take the lock-free initialize(ctx, false)
+	// path. Building with New's WithSessionLock would make this boot guard
+	// contend with whichever app is currently applying identity migrations,
+	// failing after goose's five-minute lock retry with an opaque lock error
+	// instead of the version error below. WithEnsureSchema stays: goose
+	// cannot create the version table against a schema that does not exist.
+	r, err := dbmigrate.New(migrationsFS, "migrations",
+		dbmigrate.WithVersionTable(versionTable),
+		dbmigrate.WithEnsureSchema(schemaName),
+	)
 	if err != nil {
 		return err
 	}

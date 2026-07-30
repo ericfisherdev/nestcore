@@ -22,6 +22,7 @@ package migrate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver + OpenDB
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -80,8 +82,15 @@ func WithEnsureSchema(schema string) NewOption {
 
 // WithSessionLock enables a Postgres session-level advisory lock (goose's
 // WithSessionLocker over lock.NewPostgresSessionLocker), held for the
-// duration of the connection, so two processes racing an Up against the
-// same migration set serialize instead of both applying migrations at once.
+// duration of each operation, so two processes racing an Up serialize
+// instead of both applying migrations at once.
+//
+// The lock is goose's lock.DefaultLockID, and Postgres advisory locks are
+// scoped to the DATABASE rather than to a migration set — so this
+// serializes against EVERY goose session-locked migration set in the same
+// database, not only against another Runner over this one. That is safe but
+// coarser than it sounds; if a set ever needs its own lock, this option has
+// to grow a lock ID (goose's lock.WithLockID).
 func WithSessionLock() NewOption {
 	return func(o *newOptions) { o.sessionLock = true }
 }
@@ -358,13 +367,33 @@ func (r *Runner) providerOptions() ([]goose.ProviderOption, error) {
 	return opts, nil
 }
 
+// duplicateSchemaCode and uniqueViolationCode are the SQLSTATEs a
+// CREATE SCHEMA IF NOT EXISTS losing a race to a concurrent creator can
+// surface: Postgres either reports the schema as a duplicate object, or
+// fails inserting into pg_namespace's unique index.
+const (
+	duplicateSchemaCode = "42P06"
+	uniqueViolationCode = "23505"
+)
+
 // ensureSchema creates schema via CREATE SCHEMA IF NOT EXISTS over db.
 // schema is always a compile-time literal supplied by the caller of New
 // (never end-user input), but it is quoted as a Postgres identifier anyway
 // since CREATE SCHEMA takes no bind parameters.
+//
+// IF NOT EXISTS is not atomic against a concurrent creator, and this runs
+// before goose's own advisory lock (which goose acquires per operation, on
+// its own connection, only once Provider.Up/Status/etc. is called) — so a
+// duplicate-object failure here means another process created the schema
+// first, which is exactly the postcondition this function promises.
 func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 	stmt := "CREATE SCHEMA IF NOT EXISTS " + (pgx.Identifier{schema}).Sanitize()
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) &&
+			(pgErr.Code == duplicateSchemaCode || pgErr.Code == uniqueViolationCode) {
+			return nil
+		}
 		return fmt.Errorf("ensure schema %q: %w", schema, err)
 	}
 	return nil

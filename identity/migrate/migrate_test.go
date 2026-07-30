@@ -128,6 +128,88 @@ func TestUpDownUp(t *testing.T) {
 	}
 }
 
+// TestUp_AdoptsNestorageShapedSchema proves this migration set can run
+// against a database where Nestorage's own interim
+// internal/platform/db/migrate/migrations/00017_identity_schema.sql already
+// created identity.household/identity.member/identity.sessions directly
+// (guarded with IF NOT EXISTS specifically so this set could adopt them) —
+// rather than failing on a duplicate-object error, and rather than leaving
+// Nestorage's shape (NOT NULL credentials, no uniqueness indexes) in place
+// where 00002/00003's composite FKs need it reconciled.
+func TestUp_AdoptsNestorageShapedSchema(t *testing.T) {
+	dsn := harness.DSN(t, "identity_adopt")
+	ctx := context.Background()
+	db := openDB(t, dsn)
+
+	// Pre-create Nestorage's interim shape directly, before this package's
+	// Runner ever touches the database — simulating Nestorage having
+	// deployed and migrated first.
+	for _, stmt := range []string{
+		`CREATE SCHEMA IF NOT EXISTS identity`,
+		`CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public`,
+		`CREATE EXTENSION IF NOT EXISTS citext SCHEMA public`,
+		`CREATE TABLE IF NOT EXISTS identity.household (
+			id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+			name       text        NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS identity.member (
+			id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+			household_id  uuid        NOT NULL REFERENCES identity.household (id) ON DELETE CASCADE,
+			display_name  text        NOT NULL,
+			email         citext      NOT NULL,
+			password_hash text        NOT NULL,
+			role          text        NOT NULL CHECK (role IN ('owner', 'adult', 'child')),
+			active        boolean     NOT NULL DEFAULT true,
+			created_at    timestamptz NOT NULL DEFAULT now(),
+			updated_at    timestamptz NOT NULL DEFAULT now(),
+			CONSTRAINT member_email_unique UNIQUE (email)
+		)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("pre-create Nestorage-shaped schema: %v\nstatement: %s", err, stmt)
+		}
+	}
+
+	r := newRunner(t)
+	t.Cleanup(func() {
+		if err := r.Reset(ctx, dsn); err != nil {
+			t.Logf("cleanup Reset failed: %v", err)
+		}
+	})
+
+	if err := r.Up(ctx, dsn); err != nil {
+		t.Fatalf("Up against a Nestorage-shaped identity.member = %v, want success", err)
+	}
+
+	var emailNullable string
+	if err := db.QueryRow(
+		`SELECT is_nullable FROM information_schema.columns
+		 WHERE table_schema = 'identity' AND table_name = 'member' AND column_name = 'email'`,
+	).Scan(&emailNullable); err != nil {
+		t.Fatalf("query email nullability: %v", err)
+	}
+	if emailNullable != "YES" {
+		t.Error("identity.member.email is still NOT NULL after Up, want nullable")
+	}
+
+	household := insertHousehold(t, db, "Adopted Household")
+	emailOnly := "adopted-email-only@example.com"
+	if err := insertMember(db, household, "EmailOnly", "adult", &emailOnly, nil, nil); !isCheckViolation(err) {
+		t.Errorf("insert member with email but no password_hash = %v, want a CHECK violation", err)
+	}
+	if err := insertMember(db, household, "Neither", "child", nil, nil, nil); err != nil {
+		t.Errorf("insert member with neither email nor password_hash: %v", err)
+	}
+
+	for _, table := range []string{"member_mfa", "member_credential"} {
+		if !tableExists(t, dsn, table) {
+			t.Errorf("after Up on adopted schema, identity.%s does not exist", table)
+		}
+	}
+}
+
 // TestRoleCheck_RejectsAdmin proves the role CHECK admits exactly owner,
 // adult, child and nothing else.
 func TestRoleCheck_RejectsAdmin(t *testing.T) {
