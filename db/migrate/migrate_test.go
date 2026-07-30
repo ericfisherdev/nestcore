@@ -106,6 +106,25 @@ func TestNew_ConstructionOptions(t *testing.T) {
 	}
 }
 
+// TestEnsureSchema_PropagatesExecError proves ensureSchema wraps and returns
+// db.ExecContext's error rather than swallowing it. Deterministic and
+// hermetic: sql.Open never dials (connections are lazy), so closing the
+// handle immediately after is what makes the following ExecContext fail —
+// no real database is needed to exercise this path.
+func TestEnsureSchema_PropagatesExecError(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://u:p@127.0.0.1/db")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	if err := ensureSchema(context.Background(), db, "identity"); err == nil {
+		t.Error("ensureSchema on a closed db = nil error, want error")
+	}
+}
+
 // TestPoolerSafeConnConfig verifies the pooler-safe path selects the simple
 // query protocol (no named prepared statements) without needing a database.
 func TestPoolerSafeConnConfig(t *testing.T) {
