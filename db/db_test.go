@@ -263,6 +263,23 @@ func TestPoolConfig_NoOptionsLeavesSearchPathUnset(t *testing.T) {
 	}
 }
 
+// TestPoolConfig_WithSearchPathNoArgsLeavesSearchPathUnset proves
+// WithSearchPath() called with zero schemas is a no-op, not an empty
+// search_path: strings.Join(nil, ", ") is "", and setting search_path to
+// the empty string is a valid but EMPTY search path that resolves no
+// unqualified name at all — a caller that spreads a possibly-empty
+// configured slice into this Option must not get a silently broken pool.
+func TestPoolConfig_WithSearchPathNoArgsLeavesSearchPathUnset(t *testing.T) {
+	const dsn = "postgres://u:p@localhost:5432/db?sslmode=disable"
+	got, err := poolConfig(config.DBConfig{DSN: dsn}, WithSearchPath())
+	if err != nil {
+		t.Fatalf("poolConfig() error: %v", err)
+	}
+	if _, ok := got.ConnConfig.RuntimeParams["search_path"]; ok {
+		t.Errorf("search_path = %q, want unset", got.ConnConfig.RuntimeParams["search_path"])
+	}
+}
+
 // TestNewInvalidDSN confirms New fails fast on a malformed DSN without needing
 // a live database.
 func TestNewInvalidDSN(t *testing.T) {

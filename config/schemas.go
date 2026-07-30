@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // SchemaConfig names the three Postgres schemas the shared "nest" database
@@ -39,9 +40,12 @@ const (
 // and DB_SCHEMA_NESTORAGE, defaulting to identity, nestova, and nestorage.
 func LoadSchemas() SchemaConfig {
 	return SchemaConfig{
-		Identity:  String("DB_SCHEMA_IDENTITY", defaultIdentitySchema),
-		Nestova:   String("DB_SCHEMA_NESTOVA", defaultNestovaSchema),
-		Nestorage: String("DB_SCHEMA_NESTORAGE", defaultNestorageSchema),
+		// Trimmed for the same reason LoadDB trims DB_PROVIDER/DB_POOL_MODE:
+		// whitespace in the environment must not defeat Validate's identifier
+		// check.
+		Identity:  strings.TrimSpace(String("DB_SCHEMA_IDENTITY", defaultIdentitySchema)),
+		Nestova:   strings.TrimSpace(String("DB_SCHEMA_NESTOVA", defaultNestovaSchema)),
+		Nestorage: strings.TrimSpace(String("DB_SCHEMA_NESTORAGE", defaultNestorageSchema)),
 	}
 }
 
