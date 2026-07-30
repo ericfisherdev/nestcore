@@ -234,6 +234,35 @@ func TestApplySSLRootCert_KeywordFormKeepsSpacedPathIntact(t *testing.T) {
 	}
 }
 
+// TestPoolConfigWithSearchPath verifies WithSearchPath sets the search_path
+// runtime parameter joining its schemas in order, without needing a live
+// database.
+func TestPoolConfigWithSearchPath(t *testing.T) {
+	const dsn = "postgres://u:p@localhost:5432/db?sslmode=disable"
+	got, err := poolConfig(config.DBConfig{DSN: dsn}, WithSearchPath("nestorage", "identity"))
+	if err != nil {
+		t.Fatalf("poolConfig() error: %v", err)
+	}
+	if want := "nestorage, identity"; got.ConnConfig.RuntimeParams["search_path"] != want {
+		t.Errorf("search_path = %q, want %q", got.ConnConfig.RuntimeParams["search_path"], want)
+	}
+}
+
+// TestPoolConfig_NoOptionsLeavesSearchPathUnset proves WithSearchPath is
+// opt-in: a caller that never applies it gets pgx's own parsed default
+// (unset unless the DSN itself carries an options=... search_path), not an
+// empty-string override.
+func TestPoolConfig_NoOptionsLeavesSearchPathUnset(t *testing.T) {
+	const dsn = "postgres://u:p@localhost:5432/db?sslmode=disable"
+	got, err := poolConfig(config.DBConfig{DSN: dsn})
+	if err != nil {
+		t.Fatalf("poolConfig() error: %v", err)
+	}
+	if _, ok := got.ConnConfig.RuntimeParams["search_path"]; ok {
+		t.Errorf("search_path = %q, want unset", got.ConnConfig.RuntimeParams["search_path"])
+	}
+}
+
 // TestNewInvalidDSN confirms New fails fast on a malformed DSN without needing
 // a live database.
 func TestNewInvalidDSN(t *testing.T) {
