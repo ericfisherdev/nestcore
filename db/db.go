@@ -40,12 +40,36 @@ const (
 	healthCheckPeriod = time.Minute
 )
 
+// Option customizes the pgxpool.Config New builds, beyond what DBConfig
+// itself expresses.
+type Option func(*pgxpool.Config)
+
+// WithSearchPath sets the pool's default search_path to schemas, applied as
+// a connection runtime parameter so every connection the pool opens starts
+// with it. Pass the caller's own schema first, then any schema it should
+// reach unqualified beyond that (typically the shared identity schema).
+// Schema-qualified SQL remains legal regardless — this only changes what an
+// UNQUALIFIED name resolves to, it is a default, not an access restriction.
+//
+// Setting search_path this way REPLACES Postgres's own default
+// ("$user", public) rather than extending it: a caller whose own tables
+// still live in public must include "public" explicitly or unqualified
+// references to them will stop resolving.
+func WithSearchPath(schemas ...string) Option {
+	return func(cfg *pgxpool.Config) {
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = make(map[string]string)
+		}
+		cfg.ConnConfig.RuntimeParams["search_path"] = strings.Join(schemas, ", ")
+	}
+}
+
 // New builds a pgx connection pool from cfg, verifies connectivity with a
 // bounded Ping, and returns the ready-to-use pool. A bad DSN or unreachable
 // database fails fast with a descriptive error. The caller owns the pool and
 // must Close it.
-func New(ctx context.Context, cfg config.DBConfig) (*pgxpool.Pool, error) {
-	poolCfg, err := poolConfig(cfg)
+func New(ctx context.Context, cfg config.DBConfig, opts ...Option) (*pgxpool.Pool, error) {
+	poolCfg, err := poolConfig(cfg, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -79,9 +103,11 @@ func Health(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // poolConfig derives a pgxpool configuration from cfg without connecting, so
-// the derivation is unit-testable. It parses the DSN and applies the tuning
-// overrides.
-func poolConfig(cfg config.DBConfig) (*pgxpool.Config, error) {
+// the derivation is unit-testable. It parses the DSN, applies the tuning
+// overrides, then applies opts — after the Supabase-specific tuning below,
+// so an Option can still see (and if it ever needed to, override) that
+// tuning's effect.
+func poolConfig(cfg config.DBConfig, opts ...Option) (*pgxpool.Config, error) {
 	if strings.TrimSpace(cfg.DSN) == "" {
 		// pgxpool.ParseConfig("") does not error: it resolves to libpq's
 		// defaults (a local Unix-socket connection as the invoking OS user)
@@ -122,6 +148,10 @@ func poolConfig(cfg config.DBConfig) (*pgxpool.Config, error) {
 		if err := applySupabasePooling(poolCfg, cfg.PoolMode); err != nil {
 			return nil, err
 		}
+	}
+
+	for _, opt := range opts {
+		opt(poolCfg)
 	}
 
 	return poolCfg, nil

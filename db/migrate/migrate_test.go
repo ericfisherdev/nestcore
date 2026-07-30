@@ -345,6 +345,122 @@ func isConninfoSpace(c byte) bool {
 // the cleanup Reset silently do nothing, discovered by running these tests
 // against a real Postgres for the first time (see NSTR-6's CI wiring).
 
+// TestSchemaExists_AbsentSchemaReportsFalse proves SchemaExists reports false
+// — and creates nothing — for a schema that has never been created, unlike
+// every other operation in this package (which would create it via
+// WithEnsureSchema or Up).
+func TestSchemaExists_AbsentSchemaReportsFalse(t *testing.T) {
+	dsn := isolatedDSN(t)
+	const schema = "migrate_probe_absent_test"
+	ctx := context.Background()
+
+	db := openTestDB(t, dsn)
+	if _, err := db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+		t.Fatalf("ensure schema %q absent: %v", schema, err)
+	}
+
+	exists, err := SchemaExists(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("SchemaExists: %v", err)
+	}
+	if exists {
+		t.Errorf("SchemaExists(%q) = true, want false (never created)", schema)
+	}
+	if schemaExists(t, dsn, schema) {
+		t.Errorf("SchemaExists as a side effect created %q", schema)
+	}
+}
+
+// TestSchemaExists_PresentSchemaReportsTrue proves SchemaExists reports true
+// for a schema created independently of this package's own machinery.
+func TestSchemaExists_PresentSchemaReportsTrue(t *testing.T) {
+	dsn := isolatedDSN(t)
+	const schema = "migrate_probe_present_test"
+	ctx := context.Background()
+
+	db := openTestDB(t, dsn)
+	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+		t.Fatalf("create schema %q: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Logf("cleanup drop schema failed: %v", err)
+		}
+	})
+
+	exists, err := SchemaExists(ctx, dsn, schema)
+	if err != nil {
+		t.Fatalf("SchemaExists: %v", err)
+	}
+	if !exists {
+		t.Errorf("SchemaExists(%q) = false, want true", schema)
+	}
+}
+
+// TestSchemaExists_InvalidDSNReturnsError confirms SchemaExists fails fast on
+// a malformed DSN without needing a live database.
+func TestSchemaExists_InvalidDSNReturnsError(t *testing.T) {
+	if _, err := SchemaExists(context.Background(), "://nope", "identity"); err == nil {
+		t.Error("SchemaExists() = nil error, want error for an invalid DSN")
+	}
+}
+
+// TestAppliedVersion_PristineDatabaseReportsZero proves AppliedVersion reports
+// 0 against a schema with no migrations applied yet — same "ensure the
+// version table, report zero" behaviour Reset relies on, exercised through
+// the new accessor instead.
+func TestAppliedVersion_PristineDatabaseReportsZero(t *testing.T) {
+	dsn := isolatedDSN(t)
+	r := newFixtureRunner(t)
+	ctx := context.Background()
+	if err := r.Reset(ctx, dsn); err != nil {
+		t.Fatalf("initial Reset: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := r.Reset(ctx, dsn); err != nil {
+			t.Logf("cleanup Reset failed: %v", err)
+		}
+	})
+
+	if got := appliedVersion(ctx, t, r, dsn); got != 0 {
+		t.Errorf("AppliedVersion on a pristine schema = %d, want 0", got)
+	}
+}
+
+// TestAppliedVersion_MatchesHighestAppliedStatus proves AppliedVersion agrees
+// with the highest version Status reports as applied — the cross-check a
+// caller relies on when comparing AppliedVersion against its own highest
+// known migration version to detect a schema newer than it understands.
+func TestAppliedVersion_MatchesHighestAppliedStatus(t *testing.T) {
+	dsn := isolatedDSN(t)
+	r := newFixtureRunner(t)
+	ctx := context.Background()
+	if err := r.Reset(ctx, dsn); err != nil {
+		t.Fatalf("initial Reset: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := r.Reset(ctx, dsn); err != nil {
+			t.Logf("cleanup Reset failed: %v", err)
+		}
+	})
+	if err := r.Up(ctx, dsn); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+
+	statuses, err := r.Status(ctx, dsn)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	top := latestVersion(statuses)
+	if top == 0 {
+		t.Fatal("fixture Up applied no migrations")
+	}
+
+	if got := appliedVersion(ctx, t, r, dsn); got != top {
+		t.Errorf("AppliedVersion = %d, want %d (Status's highest applied version)", got, top)
+	}
+}
+
 // TestReset_OnPristineDatabase_IsANoOp proves the behaviour delta from the
 // legacy dispatcher: Reset no longer needs a special case for a database
 // with no goose_db_version table, because Provider.DownTo ensures that
@@ -473,22 +589,15 @@ func TestConcurrentEnsureSchema_NoDuplicateSchemaError(t *testing.T) {
 	}
 }
 
+// schemaExists is a t.Fatal-on-error wrapper over the production SchemaExists,
+// the assertion shape every caller below wants.
 func schemaExists(t *testing.T, dsn, schema string) bool {
 	t.Helper()
-	db, err := sql.Open("pgx", dsn)
+	exists, err := SchemaExists(context.Background(), dsn, schema)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf("SchemaExists(%q): %v", schema, err)
 	}
-	defer func() { _ = db.Close() }()
-
-	var name *string
-	if err := db.QueryRow(`SELECT nspname FROM pg_namespace WHERE nspname = $1`, schema).Scan(&name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-		t.Fatalf("query pg_namespace for %q: %v", schema, err)
-	}
-	return name != nil
+	return exists
 }
 
 func tableExistsInSchema(t *testing.T, dsn, schema, table string) bool {
@@ -710,21 +819,13 @@ func assertMigrationStatus(t *testing.T, i int, got MigrationStatus, want migrat
 	}
 }
 
-// appliedVersion returns the current goose migration version recorded in the
-// database, via r's own Provider rather than any global goose state. Takes
-// ctx from the caller rather than manufacturing its own, matching every
-// other helper here.
+// appliedVersion is a t.Fatal-on-error wrapper over the production
+// AppliedVersion, the assertion shape every caller below wants.
 func appliedVersion(ctx context.Context, t *testing.T, r *Runner, dsn string) int64 {
 	t.Helper()
-	p, err := r.newProvider(ctx, dsn, nil)
+	v, err := r.AppliedVersion(ctx, dsn)
 	if err != nil {
-		t.Fatalf("build provider: %v", err)
-	}
-	defer func() { _ = p.Close() }()
-
-	v, err := p.GetDBVersion(ctx)
-	if err != nil {
-		t.Fatalf("GetDBVersion: %v", err)
+		t.Fatalf("AppliedVersion: %v", err)
 	}
 	return v
 }
@@ -742,4 +843,28 @@ func tableExists(t *testing.T, dsn, table string) bool {
 		t.Fatalf("query to_regclass(%q): %v", table, err)
 	}
 	return name != nil
+}
+
+// openTestDB opens a raw *sql.DB against dsn, registering its own Close
+// cleanup.
+func openTestDB(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// latestVersion returns the highest version among statuses reported as
+// applied, or 0 if none are.
+func latestVersion(statuses []MigrationStatus) int64 {
+	var top int64
+	for _, s := range statuses {
+		if s.Applied && s.Version > top {
+			top = s.Version
+		}
+	}
+	return top
 }

@@ -280,6 +280,50 @@ func (r *Runner) DownTo(ctx context.Context, dsn string, version int64, opts ...
 	return nil
 }
 
+// AppliedVersion returns the highest migration version currently recorded as
+// applied in the database — via goose's own Provider.GetDBVersion, so it
+// reflects what the DATABASE itself has recorded rather than r's filesystem.
+// Unlike Status (which reports one entry per migration r's filesystem knows
+// about), a version applied by a newer binary sharing this migration set,
+// with no corresponding source file here, still surfaces correctly: this is
+// what a caller compares against its own highest known version to detect
+// that case.
+func (r *Runner) AppliedVersion(ctx context.Context, dsn string, opts ...Option) (int64, error) {
+	p, err := r.newProvider(ctx, dsn, opts)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = p.Close() }()
+
+	v, err := p.GetDBVersion(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("goose get db version: %w", err)
+	}
+	return v, nil
+}
+
+// SchemaExists reports whether schema exists as a Postgres schema at dsn, via
+// a direct catalog query. Unlike every other operation in this package, it
+// neither creates the schema nor touches goose's version-table machinery —
+// callers use it to check what is there BEFORE deciding whether the
+// schema-creating path (Up, or anything built with WithEnsureSchema) is
+// appropriate.
+func SchemaExists(ctx context.Context, dsn, schema string) (bool, error) {
+	db, err := connect(ctx, dsn, false)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = db.Close() }()
+
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", schema,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check schema %q exists: %w", schema, err)
+	}
+	return exists, nil
+}
+
 // MigrationStatus is one migration's applied/pending state, independent of
 // goose's own type so goose stays out of this package's public API surface.
 type MigrationStatus struct {
