@@ -366,7 +366,16 @@ func TestSchemaExists_AbsentSchemaReportsFalse(t *testing.T) {
 	if exists {
 		t.Errorf("SchemaExists(%q) = true, want false (never created)", schema)
 	}
-	if schemaExists(t, dsn, schema) {
+
+	// Independent oracle: schemaExists now wraps SchemaExists itself, so
+	// calling it here would only re-assert the check above.
+	var created bool
+	if err := db.QueryRow(
+		"SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", schema,
+	).Scan(&created); err != nil {
+		t.Fatalf("query pg_namespace for %q: %v", schema, err)
+	}
+	if created {
 		t.Errorf("SchemaExists as a side effect created %q", schema)
 	}
 }
@@ -402,6 +411,34 @@ func TestSchemaExists_PresentSchemaReportsTrue(t *testing.T) {
 func TestSchemaExists_InvalidDSNReturnsError(t *testing.T) {
 	if _, err := SchemaExists(context.Background(), "://nope", "identity"); err == nil {
 		t.Error("SchemaExists() = nil error, want error for an invalid DSN")
+	}
+}
+
+// TestSchemaExists_PoolerSafeStillReportsCorrectly proves SchemaExists honors
+// PoolerSafe like every other operation in this package — a caller whose
+// only DSN is a transaction pooler must not be stuck with a broken schema
+// probe alongside an otherwise-working migration path.
+func TestSchemaExists_PoolerSafeStillReportsCorrectly(t *testing.T) {
+	dsn := isolatedDSN(t)
+	const schema = "migrate_probe_poolersafe_test"
+	ctx := context.Background()
+
+	db := openTestDB(t, dsn)
+	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+		t.Fatalf("create schema %q: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Logf("cleanup drop schema failed: %v", err)
+		}
+	})
+
+	exists, err := SchemaExists(ctx, dsn, schema, PoolerSafe())
+	if err != nil {
+		t.Fatalf("SchemaExists(PoolerSafe()): %v", err)
+	}
+	if !exists {
+		t.Errorf("SchemaExists(%q, PoolerSafe()) = false, want true", schema)
 	}
 }
 

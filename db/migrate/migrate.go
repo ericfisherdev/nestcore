@@ -288,6 +288,17 @@ func (r *Runner) DownTo(ctx context.Context, dsn string, version int64, opts ...
 // with no corresponding source file here, still surfaces correctly: this is
 // what a caller compares against its own highest known version to detect
 // that case.
+//
+// AppliedVersion is NOT side-effect-free, despite reading like a probe.
+// goose's GetDBVersion goes through Provider.initialize(ctx, true), so it
+// acquires r's session lock when r was built WithSessionLock — blocking up
+// to goose's five-minute lock retry against a concurrent migration, then
+// failing with an opaque lock error — and it ensures the version table
+// exists (CREATE TABLE plus the zero-version INSERT). r's own
+// WithEnsureSchema runs first and creates the schema. A caller probing a
+// shared schema it must neither create nor contend for should call
+// SchemaExists first and build its Runner WITHOUT WithSessionLock, exactly
+// as identity/migrate.RequireVersion does and for the same reason.
 func (r *Runner) AppliedVersion(ctx context.Context, dsn string, opts ...Option) (int64, error) {
 	p, err := r.newProvider(ctx, dsn, opts)
 	if err != nil {
@@ -307,9 +318,15 @@ func (r *Runner) AppliedVersion(ctx context.Context, dsn string, opts ...Option)
 // neither creates the schema nor touches goose's version-table machinery —
 // callers use it to check what is there BEFORE deciding whether the
 // schema-creating path (Up, or anything built with WithEnsureSchema) is
-// appropriate.
-func SchemaExists(ctx context.Context, dsn, schema string) (bool, error) {
-	db, err := connect(ctx, dsn, false)
+// appropriate. Accepts the same Option set as every other operation here —
+// notably PoolerSafe, for a caller whose only DSN is a transaction pooler.
+func SchemaExists(ctx context.Context, dsn, schema string, opts ...Option) (bool, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	db, err := connect(ctx, dsn, o.poolerSafe)
 	if err != nil {
 		return false, err
 	}

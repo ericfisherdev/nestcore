@@ -18,7 +18,7 @@ func TestLoadSchemas(t *testing.T) {
 			want: config.SchemaConfig{Identity: "identity", Nestova: "nestova", Nestorage: "nestorage"},
 		},
 		{
-			name: "overrides are read verbatim",
+			name: "overrides are read",
 			env: map[string]string{
 				"DB_SCHEMA_IDENTITY": "shared_identity", "DB_SCHEMA_NESTOVA": "nestova2", "DB_SCHEMA_NESTORAGE": "nestorage2",
 			},
@@ -28,6 +28,15 @@ func TestLoadSchemas(t *testing.T) {
 			name: "partial override keeps the other two defaults",
 			env:  map[string]string{"DB_SCHEMA_IDENTITY": "custom_identity"},
 			want: config.SchemaConfig{Identity: "custom_identity", Nestova: "nestova", Nestorage: "nestorage"},
+		},
+		{
+			// Whitespace in the environment — trivially produced by a .env
+			// or docker-compose line — must not defeat Validate's
+			// identifier check downstream, matching LoadDB's DB_PROVIDER
+			// handling.
+			name: "surrounding whitespace is trimmed",
+			env:  map[string]string{"DB_SCHEMA_IDENTITY": " identity "},
+			want: config.SchemaConfig{Identity: "identity", Nestova: "nestova", Nestorage: "nestorage"},
 		},
 	}
 

@@ -50,13 +50,29 @@ type Option func(*pgxpool.Config)
 // reach unqualified beyond that (typically the shared identity schema).
 // Schema-qualified SQL remains legal regardless — this only changes what an
 // UNQUALIFIED name resolves to, it is a default, not an access restriction.
+// No schemas is a no-op, not an empty search path — see below.
 //
 // Setting search_path this way REPLACES Postgres's own default
 // ("$user", public) rather than extending it: a caller whose own tables
 // still live in public must include "public" explicitly or unqualified
 // references to them will stop resolving.
+//
+// search_path is SESSION state, delivered here as a connection startup
+// parameter. Under DB_POOL_MODE=transaction (see applySupabasePooling) the
+// pooler multiplexes a backend connection per transaction, so confirm the
+// pooler propagates search_path before relying on this option there —
+// otherwise schema-qualify instead, since a search_path that silently fails
+// to apply resolves unqualified names against the wrong schema rather than
+// erroring.
 func WithSearchPath(schemas ...string) Option {
 	return func(cfg *pgxpool.Config) {
+		// No schemas means "no opinion": leaving RuntimeParams untouched
+		// keeps pgx's parsed default, whereas joining an empty list would
+		// set search_path to the empty string, which is a valid but EMPTY
+		// search path that resolves no unqualified name.
+		if len(schemas) == 0 {
+			return
+		}
 		if cfg.ConnConfig.RuntimeParams == nil {
 			cfg.ConnConfig.RuntimeParams = make(map[string]string)
 		}
