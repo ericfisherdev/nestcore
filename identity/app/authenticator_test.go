@@ -57,7 +57,7 @@ func TestLoginSuccess(t *testing.T) {
 		password = "correct-password"
 	)
 	repo, wantID := newFixture(t, email, password)
-	authn := app.New(repo, cryptotest.Hasher())
+	authn := app.NewAuthenticator(repo, cryptotest.Hasher())
 
 	gotID, err := authn.Login(context.Background(), email, password)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestLoginSuccess(t *testing.T) {
 func TestLoginWrongPassword(t *testing.T) {
 	t.Parallel()
 	repo, _ := newFixture(t, "bob@example.com", "rightpassword")
-	authn := app.New(repo, cryptotest.Hasher())
+	authn := app.NewAuthenticator(repo, cryptotest.Hasher())
 
 	_, err := authn.Login(context.Background(), "bob@example.com", "wrongpassword")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -82,7 +82,7 @@ func TestLoginWrongPassword(t *testing.T) {
 func TestLoginUnknownEmail(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{credentials: make(map[string]*domain.Credential)}
-	authn := app.New(repo, cryptotest.Hasher())
+	authn := app.NewAuthenticator(repo, cryptotest.Hasher())
 
 	_, err := authn.Login(context.Background(), "nobody@example.com", "anypassword")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
@@ -114,7 +114,7 @@ func TestLoginVerifiesProductionCostFixture(t *testing.T) {
 			email: {MemberID: memberID, PasswordHash: productionHash},
 		},
 	}
-	authn := app.New(repo, cryptotest.Hasher())
+	authn := app.NewAuthenticator(repo, cryptotest.Hasher())
 
 	gotID, err := authn.Login(context.Background(), email, password)
 	if err != nil {
@@ -122,6 +122,33 @@ func TestLoginVerifiesProductionCostFixture(t *testing.T) {
 	}
 	if gotID != memberID {
 		t.Errorf("Login MemberID = %v, want %v", gotID, memberID)
+	}
+}
+
+// TestLoginMalformedStoredHashIsNotInvalidCredentials proves a stored hash
+// that fails to parse (data corruption, a truncated column, or a hash
+// written by something other than crypto.Hash) is surfaced as a distinct
+// error, not silently folded into ErrInvalidCredentials — mirroring how a
+// database-outage lookup failure is already surfaced rather than masked.
+func TestLoginMalformedStoredHashIsNotInvalidCredentials(t *testing.T) {
+	t.Parallel()
+	const email = "corrupted@example.com"
+	repo := &fakeRepo{
+		credentials: map[string]*domain.Credential{
+			email: {MemberID: domain.NewMemberID(), PasswordHash: "not-a-phc-hash"},
+		},
+	}
+	authn := app.NewAuthenticator(repo, cryptotest.Hasher())
+
+	_, err := authn.Login(context.Background(), email, "anypassword")
+	if err == nil {
+		t.Fatal("Login(malformed stored hash) error = nil, want a wrapped error")
+	}
+	if errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Errorf("Login(malformed stored hash) error = %v, want a distinct error, not ErrInvalidCredentials", err)
+	}
+	if !errors.Is(err, crypto.ErrMalformedHash) {
+		t.Errorf("Login(malformed stored hash) error = %v, want it to wrap crypto.ErrMalformedHash", err)
 	}
 }
 
@@ -157,7 +184,7 @@ func TestNewDerivesTimingDummyOncePerAuthenticator(t *testing.T) {
 	counter := newCountingHasher()
 	repo := &fakeRepo{credentials: make(map[string]*domain.Credential)}
 
-	app.New(repo, counter)
+	app.NewAuthenticator(repo, counter)
 
 	if counter.hashes != 1 {
 		t.Errorf("New performed %d derivations, want exactly 1 (the timing dummy)", counter.hashes)
@@ -174,7 +201,7 @@ func TestLoginUnknownEmailStillVerifiesForTiming(t *testing.T) {
 	t.Parallel()
 	counter := newCountingHasher()
 	repo := &fakeRepo{credentials: make(map[string]*domain.Credential)}
-	authn := app.New(repo, counter)
+	authn := app.NewAuthenticator(repo, counter)
 
 	before := counter.verifies
 	_, err := authn.Login(context.Background(), "nobody@example.com", "anypassword")
@@ -193,8 +220,8 @@ func TestNewPanicsOnNilDependencies(t *testing.T) {
 	t.Parallel()
 	repo := &fakeRepo{credentials: make(map[string]*domain.Credential)}
 
-	assertPanics(t, "nil repo", func() { app.New(nil, cryptotest.Hasher()) })
-	assertPanics(t, "nil hasher", func() { app.New(repo, nil) })
+	assertPanics(t, "nil repo", func() { app.NewAuthenticator(nil, cryptotest.Hasher()) })
+	assertPanics(t, "nil hasher", func() { app.NewAuthenticator(repo, nil) })
 }
 
 func assertPanics(t *testing.T, name string, fn func()) {

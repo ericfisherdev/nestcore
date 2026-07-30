@@ -37,6 +37,9 @@ func (r *MemberRepository) CreateMember(ctx context.Context, m *domain.Member) e
 	if m == nil {
 		return errors.New("adapter: create member: nil member")
 	}
+	if !m.Role.Valid() {
+		return fmt.Errorf("adapter: create member: invalid role %q", m.Role)
+	}
 	const q = `
 		INSERT INTO identity.member (id, household_id, display_name, role)
 		VALUES ($1, $2, $3, $4)

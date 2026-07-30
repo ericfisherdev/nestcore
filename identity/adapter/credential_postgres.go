@@ -33,14 +33,18 @@ func NewCredentialRepository(dbtx db.TX) *CredentialRepository {
 }
 
 // FindByEmail returns the Credential for the given email address, or
-// domain.ErrInvalidCredentials when no member with that email and a
-// non-null password_hash exists (preventing user enumeration).
+// domain.ErrInvalidCredentials when no active member with that email and a
+// non-null password_hash exists (preventing user enumeration). A
+// deactivated member (identity.member.active = false) is excluded: login
+// is one of the readers identity/migrate's package doc names for that
+// flag.
 func (r *CredentialRepository) FindByEmail(ctx context.Context, email string) (*domain.Credential, error) {
 	const q = `
 		SELECT id, password_hash
 		  FROM identity.member
 		 WHERE email = $1
-		   AND password_hash IS NOT NULL`
+		   AND password_hash IS NOT NULL
+		   AND active`
 
 	var (
 		idStr        string

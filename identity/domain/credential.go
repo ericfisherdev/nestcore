@@ -33,14 +33,17 @@ var (
 //
 // Error contracts:
 //   - FindByEmail returns ErrInvalidCredentials when no member with that
-//     email and a password_hash exists (no user enumeration).
+//     email and a password_hash exists, and also when that member's
+//     Active is false (no user enumeration either way).
 //   - SetCredential returns ErrMemberNotFound when the member id does not
 //     exist, and ErrEmailAlreadyInUse when the email belongs to another
 //     member.
 type CredentialRepository interface {
 	// FindByEmail looks up the credential for the given email address. It
-	// returns ErrInvalidCredentials when no active credential is found, so
-	// callers cannot distinguish "no account" from "wrong password".
+	// returns ErrInvalidCredentials when no member with that email and a
+	// password_hash exists, or when that member has been deactivated
+	// (Member.Active false), so callers cannot distinguish "no account"
+	// from "wrong password" from "deactivated".
 	FindByEmail(ctx context.Context, email string) (*Credential, error)
 
 	// SetCredential stores (or replaces) the email and password hash on

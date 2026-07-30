@@ -37,22 +37,22 @@ type Authenticator struct {
 	// response timing. The plaintext is irrelevant and never matches a
 	// real login.
 	//
-	// Derived once per Authenticator in New rather than once per process
-	// in a package-level var, so that merely importing this package costs
-	// no argon2 derivation and so that its cost tracks the injected
-	// hasher.
+	// Derived once per Authenticator in NewAuthenticator rather than once
+	// per process in a package-level var, so that merely importing this
+	// package costs no argon2 derivation and so that its cost tracks the
+	// injected hasher.
 	dummyHash string
 }
 
-// New constructs an Authenticator with the supplied credential repository
-// and password hasher. Production callers pass
+// NewAuthenticator constructs an Authenticator with the supplied
+// credential repository and password hasher. Production callers pass
 // crypto.NewHasher(crypto.DefaultParams()).
-func New(repo domain.CredentialRepository, hasher passwordHasher) *Authenticator {
+func NewAuthenticator(repo domain.CredentialRepository, hasher passwordHasher) *Authenticator {
 	if repo == nil {
-		panic("app: New requires a non-nil CredentialRepository")
+		panic("app: NewAuthenticator requires a non-nil CredentialRepository")
 	}
 	if hasher == nil {
-		panic("app: New requires a non-nil password hasher")
+		panic("app: NewAuthenticator requires a non-nil password hasher")
 	}
 	dummy, err := hasher.Hash("nestcore-timing-equalizer")
 	if err != nil {
@@ -66,9 +66,11 @@ func New(repo domain.CredentialRepository, hasher passwordHasher) *Authenticator
 // Login looks up the credential for email, verifies password against the
 // stored hash, and returns the authenticated MemberID on success.
 //
-// On any failure — unknown email, wrong password, or internal error —
-// Login returns domain.ErrInvalidCredentials with no further detail to
-// prevent user enumeration.
+// On a wrong password, or an unknown/deactivated email, Login returns
+// domain.ErrInvalidCredentials with no further detail to prevent user
+// enumeration. A lookup failure or a stored hash that fails to parse is a
+// distinct internal error, wrapped and returned as-is, so the caller can
+// tell it apart from a real 401.
 func (a *Authenticator) Login(ctx context.Context, email, password string) (domain.MemberID, error) {
 	cred, err := a.repo.FindByEmail(ctx, email)
 	if err != nil {
@@ -86,7 +88,14 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (doma
 	}
 
 	ok, err := a.hasher.Verify(password, cred.PasswordHash)
-	if err != nil || !ok {
+	if err != nil {
+		// A stored hash that will not parse is data corruption, not a
+		// wrong password: surface it for the same reason the lookup
+		// failure above is surfaced, so the caller renders a 500 rather
+		// than a silent 401.
+		return domain.MemberID{}, fmt.Errorf("authenticate: verify stored hash: %w", err)
+	}
+	if !ok {
 		return domain.MemberID{}, domain.ErrInvalidCredentials
 	}
 

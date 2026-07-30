@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ericfisherdev/nestcore/identity/adapter"
 	"github.com/ericfisherdev/nestcore/identity/domain"
 )
@@ -12,6 +14,23 @@ func newCredentialTestRepos(t *testing.T) (*adapter.HouseholdRepository, *adapte
 	t.Helper()
 	pool := newTestPool(t)
 	return adapter.NewHouseholdRepository(pool), adapter.NewMemberRepository(pool), adapter.NewCredentialRepository(pool)
+}
+
+// newCredentialTestReposWithPool is newCredentialTestRepos plus the pool
+// itself, for the handful of tests that need to poke a column no port
+// exposes a write for (e.g. deactivating a member directly, standing in
+// for the NSTR-111 guard this schema's active flag ultimately backs).
+func newCredentialTestReposWithPool(t *testing.T) (*pgxpool.Pool, *adapter.HouseholdRepository, *adapter.MemberRepository, *adapter.CredentialRepository) {
+	t.Helper()
+	pool := newTestPool(t)
+	return pool, adapter.NewHouseholdRepository(pool), adapter.NewMemberRepository(pool), adapter.NewCredentialRepository(pool)
+}
+
+func deactivateMember(t *testing.T, pool *pgxpool.Pool, memberID domain.MemberID) {
+	t.Helper()
+	if _, err := pool.Exec(testCtx(t), `UPDATE identity.member SET active = false WHERE id = $1`, memberID.String()); err != nil {
+		t.Fatalf("deactivate member: %v", err)
+	}
 }
 
 func seedMember(t *testing.T, households *adapter.HouseholdRepository, members *adapter.MemberRepository, householdName, displayName string) *domain.Member {
@@ -75,15 +94,47 @@ func TestFindByEmailUnknown(t *testing.T) {
 	}
 }
 
-// TestFindByEmailNoPasswordSet proves a member with no credential set
-// (email and password_hash both NULL, the child-member case) does not
-// leak through FindByEmail even by accident — there is no email to query
-// by in the first place, so this simply confirms the not-found path.
-func TestFindByEmailNoPasswordSet(t *testing.T) {
-	households, members, credentials := newCredentialTestRepos(t)
-	seedMember(t, households, members, "No Credential Household", "Child")
+// TestFindByEmailDeactivatedMember proves a deactivated member
+// (identity.member.active = false) does not authenticate even with a
+// correct email and an intact password_hash — the login read path is one
+// of the readers identity/migrate's package doc names for that flag.
+func TestFindByEmailDeactivatedMember(t *testing.T) {
+	pool, households, members, credentials := newCredentialTestReposWithPool(t)
+	m := seedMember(t, households, members, "Deactivated Household", "Alice")
 
-	if _, err := credentials.FindByEmail(testCtx(t), ""); !errors.Is(err, domain.ErrInvalidCredentials) {
-		t.Errorf("FindByEmail(no credential set) error = %v, want ErrInvalidCredentials", err)
+	const email = "deactivated@example.com"
+	if err := credentials.SetCredential(testCtx(t), m.ID, email, "hash"); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+	deactivateMember(t, pool, m.ID)
+
+	if _, err := credentials.FindByEmail(testCtx(t), email); !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Errorf("FindByEmail(deactivated member) error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+// TestSetCredentialReplacesExisting covers the "(or replaces)" half of
+// SetCredential's contract — the change-password/change-email flow —
+// which the single-write cases above do not exercise.
+func TestSetCredentialReplacesExisting(t *testing.T) {
+	households, members, credentials := newCredentialTestRepos(t)
+	m := seedMember(t, households, members, "Replace Household", "Alice")
+
+	if err := credentials.SetCredential(testCtx(t), m.ID, "old@example.com", "hash-old"); err != nil {
+		t.Fatalf("SetCredential(initial): %v", err)
+	}
+	if err := credentials.SetCredential(testCtx(t), m.ID, "new@example.com", "hash-new"); err != nil {
+		t.Fatalf("SetCredential(replacement): %v", err)
+	}
+
+	got, err := credentials.FindByEmail(testCtx(t), "new@example.com")
+	if err != nil {
+		t.Fatalf("FindByEmail(new address): %v", err)
+	}
+	if got.MemberID != m.ID || got.PasswordHash != "hash-new" {
+		t.Errorf("FindByEmail = %+v, want MemberID=%v PasswordHash=%q", got, m.ID, "hash-new")
+	}
+	if _, err := credentials.FindByEmail(testCtx(t), "old@example.com"); !errors.Is(err, domain.ErrInvalidCredentials) {
+		t.Errorf("FindByEmail(old address) error = %v, want ErrInvalidCredentials", err)
 	}
 }
