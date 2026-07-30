@@ -283,6 +283,17 @@ func TestConcurrentUp_SessionLock_AppliesExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestRequireVersion_PropagatesStatusError proves RequireVersion surfaces a
+// wrapped error when reading the schema's status fails, rather than only
+// ever exercising the below-minimum path. Deterministic and hermetic: an
+// unparsable DSN fails inside connect() before any network attempt, so this
+// needs no database and runs in the default suite.
+func TestRequireVersion_PropagatesStatusError(t *testing.T) {
+	if err := migrate.RequireVersion(context.Background(), "://not-a-valid-dsn", 1); err == nil {
+		t.Error("RequireVersion with an unparsable DSN = nil error, want error")
+	}
+}
+
 // TestRequireVersion proves RequireVersion refuses a schema older than the
 // requested minimum and accepts one at or above it.
 func TestRequireVersion(t *testing.T) {
