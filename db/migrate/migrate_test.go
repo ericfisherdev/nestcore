@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -400,6 +401,75 @@ func TestEnsureSchemaAndVersionTable(t *testing.T) {
 	}
 	if !tableExistsInSchema(t, dsn, schema, "goose_db_version") {
 		t.Errorf("version table %s.goose_db_version was not created", schema)
+	}
+}
+
+// TestConcurrentEnsureSchema_NoDuplicateSchemaError proves ensureSchema
+// tolerates losing a race to a concurrent creator: CREATE SCHEMA IF NOT
+// EXISTS is not atomic, and ensureSchema runs before goose's own advisory
+// lock (only acquired later, inside an operation like Up), so two callers
+// racing against a schema that does not exist yet must both succeed rather
+// than one failing on a duplicate-object error.
+//
+// This calls ensureSchema directly, over its own dedicated connections,
+// rather than going through Runner.Up: racing full unlocked migration runs
+// would additionally race the fixture migrations' own unqualified CREATE
+// TABLE statements against each other (a different, unrelated failure mode
+// that has nothing to do with schema creation, and would corrupt this
+// package's shared fixture database for every other gated test in it). The
+// schema is dropped first so the race window is guaranteed open when the
+// concurrent calls start — TestConcurrentUp_SessionLock_AppliesExactlyOnce
+// in identity/migrate does not cover this path at all, because its setup
+// Reset already creates the schema before its concurrent Ups begin, and it
+// races under WithSessionLock, which serializes the migrations themselves
+// rather than exercising ensureSchema's own pre-lock race window.
+func TestConcurrentEnsureSchema_NoDuplicateSchemaError(t *testing.T) {
+	dsn := isolatedDSN(t)
+	const schema = "migrate_ensure_race_test"
+	ctx := context.Background()
+
+	setup, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := setup.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+		_ = setup.Close()
+		t.Fatalf("drop schema %q to open the race window: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		defer func() { _ = setup.Close() }()
+		if _, err := setup.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+			t.Logf("cleanup drop schema failed: %v", err)
+		}
+	})
+
+	const concurrentCallers = 8
+	errs := make([]error, concurrentCallers)
+	var wg sync.WaitGroup
+	for i := range concurrentCallers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Each caller gets its own connection, standing in for a
+			// separate process/binary rather than a shared one.
+			conn, err := sql.Open("pgx", dsn)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			errs[i] = ensureSchema(ctx, conn, schema)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent ensureSchema %d: %v", i, err)
+		}
+	}
+	if !schemaExists(t, dsn, schema) {
+		t.Errorf("schema %q was not created by any of the concurrent callers", schema)
 	}
 }
 
