@@ -67,6 +67,27 @@ func TestCreateMemberDuplicateName(t *testing.T) {
 	}
 }
 
+// TestCreateMemberInvalidRole proves CreateMember rejects an invalid or
+// zero-value Role before it ever reaches the database, rather than
+// surfacing an opaque SQLSTATE 23514 from the baseline migration's
+// unnamed role CHECK constraint.
+func TestCreateMemberInvalidRole(t *testing.T) {
+	households, members := newMemberTestRepos(t)
+	h := seedHousehold(t, households, "Invalid Role Household")
+
+	for name, role := range map[string]domain.Role{
+		"unknown value": domain.Role("admin"),
+		"zero value":    domain.Role(""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &domain.Member{ID: domain.NewMemberID(), HouseholdID: h.ID, DisplayName: name, Role: role}
+			if err := members.CreateMember(testCtx(t), m); err == nil {
+				t.Fatalf("CreateMember(role=%q) error = nil, want non-nil", role)
+			}
+		})
+	}
+}
+
 func TestCreateMemberUnknownHousehold(t *testing.T) {
 	_, members := newMemberTestRepos(t)
 	m := &domain.Member{
