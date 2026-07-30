@@ -31,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver + OpenDB
 	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/lock"
 )
 
 const dialect = goose.DialectPostgres
@@ -39,7 +40,50 @@ const dialect = goose.DialectPostgres
 // one with New; it holds no process-global state, so multiple Runners over
 // different migration sets are safe to use concurrently in one process.
 type Runner struct {
-	migrations fs.FS
+	migrations   fs.FS
+	versionTable string
+	ensureSchema string
+	sessionLock  bool
+}
+
+// newOptions configures a Runner's construction-time behavior: which goose
+// version table it bookkeeps against, an optional schema to guarantee
+// exists first, and whether its operations serialize against each other via
+// a session-level advisory lock. Distinct from Option (below), which
+// configures a single Up/Down/etc. call rather than the Runner itself.
+type newOptions struct {
+	versionTable string
+	ensureSchema string
+	sessionLock  bool
+}
+
+// NewOption customizes New.
+type NewOption func(*newOptions)
+
+// WithVersionTable sets a non-default goose version table name — optionally
+// schema-qualified as "schema.table" — for a migration set that shares a
+// database with other independently versioned migration sets and so cannot
+// use goose's default goose_db_version.
+func WithVersionTable(name string) NewOption {
+	return func(o *newOptions) { o.versionTable = name }
+}
+
+// WithEnsureSchema creates schema, via CREATE SCHEMA IF NOT EXISTS, on
+// connect — before goose's Provider first touches its version table. goose
+// itself never creates a schema, so a caller whose version table (see
+// WithVersionTable) lives outside the database's default schema needs one
+// guaranteed to exist first, or Provider construction fails trying to
+// create that table against a schema that is not there yet.
+func WithEnsureSchema(schema string) NewOption {
+	return func(o *newOptions) { o.ensureSchema = schema }
+}
+
+// WithSessionLock enables a Postgres session-level advisory lock (goose's
+// WithSessionLocker over lock.NewPostgresSessionLocker), held for the
+// duration of the connection, so two processes racing an Up against the
+// same migration set serialize instead of both applying migrations at once.
+func WithSessionLock() NewOption {
+	return func(o *newOptions) { o.sessionLock = true }
 }
 
 // New returns a Runner over the .sql migrations rooted at dir within fsys.
@@ -54,7 +98,7 @@ type Runner struct {
 // requires of the filesystem it was built from. fs.Sub does not itself fail
 // on a missing directory, so without this check a bad dir would surface
 // only much later, as an opaque "no migrations found" from inside goose.
-func New(fsys fs.FS, dir string) (*Runner, error) {
+func New(fsys fs.FS, dir string, opts ...NewOption) (*Runner, error) {
 	if dir == "" {
 		dir = "."
 	}
@@ -69,7 +113,17 @@ func New(fsys fs.FS, dir string) (*Runner, error) {
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("migrate: no .sql migrations found in %q", dir)
 	}
-	return &Runner{migrations: sub}, nil
+
+	var o newOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return &Runner{
+		migrations:   sub,
+		versionTable: o.versionTable,
+		ensureSchema: o.ensureSchema,
+		sessionLock:  o.sessionLock,
+	}, nil
 }
 
 // options configures how a migration command connects.
@@ -264,12 +318,56 @@ func (r *Runner) newProvider(ctx context.Context, dsn string, opts []Option) (*g
 		return nil, err
 	}
 
-	p, err := goose.NewProvider(dialect, db, r.migrations)
+	if r.ensureSchema != "" {
+		if err := ensureSchema(ctx, db, r.ensureSchema); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+
+	providerOpts, err := r.providerOptions()
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	p, err := goose.NewProvider(dialect, db, r.migrations, providerOpts...)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("build goose provider: %w", err)
 	}
 	return p, nil
+}
+
+// providerOptions translates r's construction-time configuration into goose
+// ProviderOptions. Kept separate from newProvider so the session locker's
+// own construction error — the only one of the three that can fail — is
+// handled in one place rather than inline in an already-branchy function.
+func (r *Runner) providerOptions() ([]goose.ProviderOption, error) {
+	var opts []goose.ProviderOption
+	if r.versionTable != "" {
+		opts = append(opts, goose.WithTableName(r.versionTable))
+	}
+	if r.sessionLock {
+		locker, err := lock.NewPostgresSessionLocker()
+		if err != nil {
+			return nil, fmt.Errorf("build session locker: %w", err)
+		}
+		opts = append(opts, goose.WithSessionLocker(locker))
+	}
+	return opts, nil
+}
+
+// ensureSchema creates schema via CREATE SCHEMA IF NOT EXISTS over db.
+// schema is always a compile-time literal supplied by the caller of New
+// (never end-user input), but it is quoted as a Postgres identifier anyway
+// since CREATE SCHEMA takes no bind parameters.
+func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
+	stmt := "CREATE SCHEMA IF NOT EXISTS " + (pgx.Identifier{schema}).Sanitize()
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("ensure schema %q: %w", schema, err)
+	}
+	return nil
 }
 
 // connect opens a database/sql handle via openDB and verifies connectivity up
