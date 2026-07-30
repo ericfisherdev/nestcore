@@ -26,7 +26,8 @@ GATED_COVERAGE_OUT := coverage.gated.out
 # packages too — their DB-dependent tests self-skip without the env var —
 # test-gated just runs them explicitly, with the env var required.
 GATED_TEST_PACKAGES := \
-	./db/...
+	./db/... \
+	./identity/...
 
 .PHONY: all build test test-gated cover lint fmt hooks hooks-uninstall tidy clean help
 

@@ -56,6 +56,55 @@ func TestNew(t *testing.T) {
 	})
 }
 
+// TestNew_ConstructionOptions verifies WithVersionTable, WithEnsureSchema,
+// and WithSessionLock each set their corresponding Runner field, and that a
+// Runner built with none of them (every existing caller's call pattern)
+// leaves all three at their zero value.
+func TestNew_ConstructionOptions(t *testing.T) {
+	t.Run("no options leaves every field at its zero value", func(t *testing.T) {
+		r := newFixtureRunner(t)
+		if r.versionTable != "" {
+			t.Errorf("versionTable = %q, want empty", r.versionTable)
+		}
+		if r.ensureSchema != "" {
+			t.Errorf("ensureSchema = %q, want empty", r.ensureSchema)
+		}
+		if r.sessionLock {
+			t.Error("sessionLock = true, want false")
+		}
+	})
+
+	t.Run("WithVersionTable sets versionTable", func(t *testing.T) {
+		r, err := New(fixtureFS, fixtureDir, WithVersionTable("identity.goose_db_version"))
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		if r.versionTable != "identity.goose_db_version" {
+			t.Errorf("versionTable = %q, want %q", r.versionTable, "identity.goose_db_version")
+		}
+	})
+
+	t.Run("WithEnsureSchema sets ensureSchema", func(t *testing.T) {
+		r, err := New(fixtureFS, fixtureDir, WithEnsureSchema("identity"))
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		if r.ensureSchema != "identity" {
+			t.Errorf("ensureSchema = %q, want %q", r.ensureSchema, "identity")
+		}
+	})
+
+	t.Run("WithSessionLock sets sessionLock", func(t *testing.T) {
+		r, err := New(fixtureFS, fixtureDir, WithSessionLock())
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		if !r.sessionLock {
+			t.Error("sessionLock = false, want true")
+		}
+	})
+}
+
 // TestPoolerSafeConnConfig verifies the pooler-safe path selects the simple
 // query protocol (no named prepared statements) without needing a database.
 func TestPoolerSafeConnConfig(t *testing.T) {
@@ -296,6 +345,75 @@ func TestReset_OnPristineDatabase_IsANoOp(t *testing.T) {
 	if v := appliedVersion(ctx, t, r, dsn); v != 0 {
 		t.Errorf("applied version after Reset on pristine database = %d, want 0", v)
 	}
+}
+
+// TestEnsureSchemaAndVersionTable proves the two construction options
+// identity/migrate relies on actually take effect against a real database:
+// WithEnsureSchema creates a schema goose itself never would, and
+// WithVersionTable places goose's bookkeeping table inside it rather than
+// the default public.goose_db_version — the pair that lets an
+// independently-versioned migration set share a database with others
+// without colliding on either the schema or the version table.
+func TestEnsureSchemaAndVersionTable(t *testing.T) {
+	dsn := isolatedDSN(t)
+	const schema = "migrate_ensure_test"
+	r, err := New(fixtureFS, fixtureDir,
+		WithEnsureSchema(schema),
+		WithVersionTable(schema+".goose_db_version"),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	ctx := context.Background()
+
+	if err := r.Up(ctx, dsn); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := r.Reset(ctx, dsn); err != nil {
+			t.Logf("cleanup Reset failed: %v", err)
+		}
+	})
+
+	if !schemaExists(t, dsn, schema) {
+		t.Errorf("schema %q was not created by WithEnsureSchema", schema)
+	}
+	if !tableExistsInSchema(t, dsn, schema, "goose_db_version") {
+		t.Errorf("version table %s.goose_db_version was not created", schema)
+	}
+}
+
+func schemaExists(t *testing.T, dsn, schema string) bool {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var name *string
+	if err := db.QueryRow(`SELECT nspname FROM pg_namespace WHERE nspname = $1`, schema).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+		t.Fatalf("query pg_namespace for %q: %v", schema, err)
+	}
+	return name != nil
+}
+
+func tableExistsInSchema(t *testing.T, dsn, schema, table string) bool {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var name *string
+	if err := db.QueryRow(`SELECT to_regclass($1)`, schema+"."+table).Scan(&name); err != nil {
+		t.Fatalf("query to_regclass(%q): %v", schema+"."+table, err)
+	}
+	return name != nil
 }
 
 // TestUpDownRoundTrip applies and rolls back the full fixture migration set
