@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/ericfisherdev/nestcore/identity/domain"
+	identity "github.com/ericfisherdev/nestcore/identity/domain"
 )
 
 // RandomAccessReader is a read source that also supports offset-based
@@ -65,7 +65,7 @@ type PutResult struct {
 // ObjectLister below) is a new, narrowly-scoped interface a caller
 // type-asserts for, never a widening of this one.
 type PhotoStore interface {
-	Put(ctx context.Context, householdID domain.HouseholdID, class PhotoClass, r io.Reader) (PutResult, error)
+	Put(ctx context.Context, householdID identity.HouseholdID, class PhotoClass, r io.Reader) (PutResult, error)
 	Open(ctx context.Context, ref StorageRef) (PhotoReader, error)
 	Delete(ctx context.Context, ref StorageRef) error
 

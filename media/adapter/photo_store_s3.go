@@ -120,6 +120,8 @@ func NewS3PhotoStore(ctx context.Context, params S3Params) (*S3PhotoStore, error
 		return nil, fmt.Errorf("media/adapter: max upload bytes must be positive, got %d", params.MaxUploadBytes)
 	case params.PresignTTL <= 0:
 		return nil, fmt.Errorf("media/adapter: presign ttl must be positive, got %v", params.PresignTTL)
+	case (params.AccessKeyID == "") != (params.SecretAccessKey == ""):
+		return nil, errors.New("media/adapter: S3 photo store AccessKeyID and SecretAccessKey must both be set, or both left blank to use the SDK's default credential chain")
 	}
 
 	optFns := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(params.Region)}

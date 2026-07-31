@@ -441,6 +441,107 @@ func TestScrubReencodesAndBakesOrientation(t *testing.T) {
 		}
 	})
 
+	t.Run("orientation 3 rotates 180, no dimension swap", func(t *testing.T) {
+		got, err := r.Scrub(square, 3)
+		if err != nil {
+			t.Fatalf("Scrub: %v", err)
+		}
+		img, _, err := image.Decode(bytes.NewReader(got))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if img.Bounds().Dx() != 16 || img.Bounds().Dy() != 16 {
+			t.Fatalf("bounds = %v, want 16x16 (no swap)", img.Bounds())
+		}
+		// 180: src(x,y) -> dst(w-1-x, h-1-y): opposite corners swap.
+		if !closeEnough(blockCenterColor(t, got, 0, 0), yellow) {
+			t.Fatalf("orientation 3 top-left = %v, want yellow (bottom-right rotated into top-left)", blockCenterColor(t, got, 0, 0))
+		}
+		if !closeEnough(blockCenterColor(t, got, 1, 1), red) {
+			t.Fatalf("orientation 3 bottom-right = %v, want red (top-left rotated into bottom-right)", blockCenterColor(t, got, 1, 1))
+		}
+	})
+
+	t.Run("orientation 4 flips vertical, no dimension swap", func(t *testing.T) {
+		got, err := r.Scrub(square, 4)
+		if err != nil {
+			t.Fatalf("Scrub: %v", err)
+		}
+		img, _, err := image.Decode(bytes.NewReader(got))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if img.Bounds().Dx() != 16 || img.Bounds().Dy() != 16 {
+			t.Fatalf("bounds = %v, want 16x16 (no swap)", img.Bounds())
+		}
+		// vertical flip: src(x,y) -> dst(x, h-1-y): rows swap, columns fixed.
+		if !closeEnough(blockCenterColor(t, got, 0, 0), blue) {
+			t.Fatalf("orientation 4 top-left = %v, want blue (bottom-left flipped into top-left)", blockCenterColor(t, got, 0, 0))
+		}
+		if !closeEnough(blockCenterColor(t, got, 0, 1), red) {
+			t.Fatalf("orientation 4 bottom-left = %v, want red (top-left flipped into bottom-left)", blockCenterColor(t, got, 0, 1))
+		}
+	})
+
+	t.Run("orientation 5 transposes and swaps dimensions", func(t *testing.T) {
+		got, err := r.Scrub(square, 5)
+		if err != nil {
+			t.Fatalf("Scrub: %v", err)
+		}
+		img, _, err := image.Decode(bytes.NewReader(got))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if img.Bounds().Dx() != 16 || img.Bounds().Dy() != 16 {
+			t.Fatalf("bounds = %v, want 16x16", img.Bounds())
+		}
+		// transpose: src(x,y) -> dst(y,x): off-diagonal blocks swap, the
+		// main diagonal (top-left, bottom-right) stays fixed.
+		if !closeEnough(blockCenterColor(t, got, 1, 0), blue) {
+			t.Fatalf("orientation 5 top-right = %v, want blue (bottom-left transposed into top-right)", blockCenterColor(t, got, 1, 0))
+		}
+		if !closeEnough(blockCenterColor(t, got, 0, 1), green) {
+			t.Fatalf("orientation 5 bottom-left = %v, want green (top-right transposed into bottom-left)", blockCenterColor(t, got, 0, 1))
+		}
+
+		nonSquare := blockImage(t, 3, 1, [][]color.RGBA{{red, green, blue}}) // 24x8
+		gotDims, err := r.Scrub(nonSquare, 5)
+		if err != nil {
+			t.Fatalf("Scrub(nonSquare): %v", err)
+		}
+		dimsImg, _, err := image.Decode(bytes.NewReader(gotDims))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if dimsImg.Bounds().Dx() != 8 || dimsImg.Bounds().Dy() != 24 {
+			t.Fatalf("bounds = %v, want 8x24 (dimensions must swap for orientation 5)", dimsImg.Bounds())
+		}
+	})
+
+	t.Run("orientation 7 flips horizontal then rotates 90 CW, swaps dimensions", func(t *testing.T) {
+		nonSquare := blockImage(t, 3, 1, [][]color.RGBA{{red, green, blue}}) // 24x8
+		got, err := r.Scrub(nonSquare, 7)
+		if err != nil {
+			t.Fatalf("Scrub: %v", err)
+		}
+		img, _, err := image.Decode(bytes.NewReader(got))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if img.Bounds().Dx() != 8 || img.Bounds().Dy() != 24 {
+			t.Fatalf("bounds = %v, want 8x24 (dimensions must swap for orientation 7)", img.Bounds())
+		}
+		// flip-then-rotate reverses the plain-transpose order: the source's
+		// first block (red) lands in the LAST destination row, not the
+		// first.
+		if !closeEnough(blockCenterColor(t, got, 0, 0), blue) {
+			t.Fatalf("orientation 7 top block = %v, want blue", blockCenterColor(t, got, 0, 0))
+		}
+		if !closeEnough(blockCenterColor(t, got, 0, 2), red) {
+			t.Fatalf("orientation 7 bottom block = %v, want red", blockCenterColor(t, got, 0, 2))
+		}
+	})
+
 	t.Run("orientation 6 rotates 90 CW and swaps dimensions", func(t *testing.T) {
 		got, err := r.Scrub(square, 6)
 		if err != nil {

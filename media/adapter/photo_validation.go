@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 
 	// Image format decoders registered for image.DecodeConfig: jpeg/png
@@ -205,6 +206,13 @@ func classKeyPrefix(class domain.PhotoClass) (string, error) {
 	return class.String(), nil
 }
 
+// storageKeyHashPattern matches a hex-encoded sha256 sum: exactly 64
+// lowercase hex characters, the shape Put's own hasher always produces —
+// checked by buildStorageKey because BuildStorageKey (below) is exported
+// for an external caller (a storage migrator) to invoke directly with its
+// own sum, bypassing Put's internal hashing entirely.
+var storageKeyHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // buildStorageKey builds the class-namespaced, content-addressed key every
 // PhotoStore backend uses — households/<household>/<class>/<aa>/<hash>.<ext>
 // — shared by LocalPhotoStore (where it becomes a relative filesystem path)
@@ -213,12 +221,37 @@ func classKeyPrefix(class domain.PhotoClass) (string, error) {
 // slashes only, never the OS path separator) since an S3 key is never
 // OS-path-shaped; LocalPhotoStore's resolve converts to the OS separator
 // only at the point it actually touches the filesystem.
+//
+// sum and ext are validated here (not just at Put's internal call site)
+// because BuildStorageKey is exported for a caller outside this package's
+// control: an unvalidated sum shorter than 2 bytes would panic on sum[:2],
+// and an unvalidated ext could otherwise smuggle a path-traversal segment
+// into the returned key.
 func buildStorageKey(householdID identity.HouseholdID, class domain.PhotoClass, sum, ext string) (string, error) {
 	classPrefix, err := classKeyPrefix(class)
 	if err != nil {
 		return "", err
 	}
+	if !storageKeyHashPattern.MatchString(sum) {
+		return "", fmt.Errorf("media/adapter: build storage key: sum must be a 64-character lowercase hex sha256, got %q", sum)
+	}
+	if !validExtension(ext) {
+		return "", fmt.Errorf("media/adapter: build storage key: unrecognized extension %q", ext)
+	}
 	return path.Join("households", householdID.String(), classPrefix, sum[:2], sum+"."+ext), nil
+}
+
+// validExtension reports whether ext is one of acceptedTypes' own stored
+// extensions — the same closed set Put always derives ext from internally,
+// so BuildStorageKey's external caller cannot supply an ext this package
+// never produces itself.
+func validExtension(ext string) bool {
+	for _, accepted := range acceptedTypes {
+		if accepted == ext {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildStorageKey exposes buildStorageKey's shared class-namespaced,

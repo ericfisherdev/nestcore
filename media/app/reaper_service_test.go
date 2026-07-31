@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -21,12 +22,17 @@ var (
 
 // fakeObjectLister fakes domain.ObjectLister: a fixed set of objects per
 // class, so a test can shape exactly what "the bucket contains" without a
-// real object store.
+// real object store. listErr, when set, makes ListObjects fail regardless
+// of class.
 type fakeObjectLister struct {
 	objects map[domain.PhotoClass][]domain.ObjectInfo
+	listErr error
 }
 
 func (f *fakeObjectLister) ListObjects(_ context.Context, class domain.PhotoClass) ([]domain.ObjectInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.objects[class], nil
 }
 
@@ -249,5 +255,58 @@ func TestReaperDryRunPreviewsWithoutDeleting(t *testing.T) {
 	}
 	if len(photos.existsCalls) != 0 {
 		t.Fatal("DryRun must not perform Run's per-candidate recheck")
+	}
+}
+
+// TestReaperDeletesExactlyAtGraceWindowBoundary covers the boundary itself:
+// orphanCandidates' cutoff check is obj.LastModified.After(cutoff), so an
+// object whose LastModified equals the cutoff exactly (neither strictly
+// after nor before it) is NOT "after" and therefore IS eligible for
+// deletion — the grace window is inclusive of its own edge, not exclusive.
+func TestReaperDeletesExactlyAtGraceWindowBoundary(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-testGraceWindow)
+	ref := domain.StorageRef("households/hh/test_reaper_class_a/aa/boundary.jpg")
+
+	photos := newFakePhotoRepo()
+	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+		testReaperClassA: {{Key: ref, LastModified: cutoff}},
+	}}
+	store := &fakePhotoStore{}
+
+	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	result, err := r.Run(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.OrphansDeleted[testReaperClassA] != 1 {
+		t.Fatalf("OrphansDeleted[classA] = %d, want 1 (an object exactly at the grace-window cutoff is eligible)", result.OrphansDeleted[testReaperClassA])
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != ref {
+		t.Fatalf("store.deleted = %v, want exactly [%s]", store.deleted, ref)
+	}
+}
+
+// TestReaperRunPropagatesListerError and
+// TestReaperDryRunPropagatesListerError cover the lister-failure path: an
+// ObjectLister error must propagate as an error, never be silently
+// swallowed into an empty/zero result.
+func TestReaperRunPropagatesListerError(t *testing.T) {
+	lister := &fakeObjectLister{listErr: errors.New("bucket unreachable")}
+	photos := newFakePhotoRepo()
+	r := newTestReaper(t, lister, &fakePhotoStore{}, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+
+	if _, err := r.Run(context.Background(), time.Now()); err == nil {
+		t.Fatal("Run should fail when the lister errors")
+	}
+}
+
+func TestReaperDryRunPropagatesListerError(t *testing.T) {
+	lister := &fakeObjectLister{listErr: errors.New("bucket unreachable")}
+	photos := newFakePhotoRepo()
+	r := newTestReaper(t, lister, &fakePhotoStore{}, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+
+	if _, err := r.DryRun(context.Background(), time.Now()); err == nil {
+		t.Fatal("DryRun should fail when the lister errors")
 	}
 }

@@ -117,10 +117,11 @@ func (r *PhotoRepository) FindByContentHash(ctx context.Context, householdID ide
 	return photo, nil
 }
 
-// ListByHousehold returns the household's photos ordered by creation time,
-// or an empty slice when none exist.
+// ListByHousehold returns the household's photos ordered by creation time
+// (id as the tiebreaker for rows sharing an identical created_at), or an
+// empty slice when none exist.
 func (r *PhotoRepository) ListByHousehold(ctx context.Context, householdID identity.HouseholdID) ([]*domain.Photo, error) {
-	rows, err := r.dbtx.Query(ctx, photoColumns+` WHERE household_id = $1 ORDER BY created_at`, householdID.String())
+	rows, err := r.dbtx.Query(ctx, photoColumns+` WHERE household_id = $1 ORDER BY created_at, id`, householdID.String())
 	if err != nil {
 		return nil, fmt.Errorf("list photos: %w", err)
 	}
@@ -175,7 +176,13 @@ func (r *PhotoRepository) ExistsByStorageRef(ctx context.Context, ref domain.Sto
 
 // ListByBackend returns up to limit photo rows stamped with backend,
 // ordered by id ascending, whose id is strictly greater than afterID.
+// Returns an error for a non-positive limit rather than issuing a query
+// LIMIT 0 (silently empty) or a negative LIMIT (a Postgres error the
+// caller would otherwise have to decode).
 func (r *PhotoRepository) ListByBackend(ctx context.Context, backend domain.StorageBackend, afterID domain.PhotoID, limit int) ([]*domain.Photo, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("media/adapter: list photos by backend: limit must be positive, got %d", limit)
+	}
 	rows, err := r.dbtx.Query(ctx, photoColumns+` WHERE storage_backend = $1 AND id > $2 ORDER BY id LIMIT $3`,
 		backend.String(), afterID.String(), limit)
 	if err != nil {
@@ -192,8 +199,8 @@ func (r *PhotoRepository) MigrateStorageBackend(ctx context.Context, id domain.P
 	const q = `
 		UPDATE photo
 		   SET storage_ref = $2, storage_backend = $3, content_sha256 = COALESCE(content_sha256, $4)
-		 WHERE id = $1 AND storage_backend = 'local'`
-	tag, err := r.dbtx.Exec(ctx, q, id.String(), newRef.String(), newBackend.String(), nullableText(contentHash))
+		 WHERE id = $1 AND storage_backend = $5`
+	tag, err := r.dbtx.Exec(ctx, q, id.String(), newRef.String(), newBackend.String(), nullableText(contentHash), domain.StorageBackendLocal.String())
 	if err != nil {
 		return false, fmt.Errorf("migrate photo storage backend: %w", err)
 	}

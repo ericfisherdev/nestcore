@@ -35,6 +35,16 @@
 //	CREATE UNIQUE INDEX photo_household_content_hash_uniq
 //	    ON photo (household_id, content_sha256)
 //	    WHERE content_sha256 IS NOT NULL;
+//	CREATE INDEX photo_household_id_created_at_idx ON photo (household_id, created_at);
+//	CREATE INDEX photo_storage_backend_id_idx ON photo (storage_backend, id);
+//
+// The two plain (non-unique) indexes above match this package's own query
+// shapes — ListByHousehold's household_id-filtered, created_at-ordered scan
+// and ListByBackend/ListAllStorageRefs' storage_backend-filtered,
+// id-ordered scan — so every consumer's migration should include them,
+// though PhotoRepository has no way to enforce that the way it enforces the
+// unique index (a missing plain index only costs query performance, never
+// correctness).
 //
 // The household_id and uploaded_by foreign keys must be declared inline
 // (unnamed) so Postgres auto-names them photo_household_id_fkey and

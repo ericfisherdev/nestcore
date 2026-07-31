@@ -31,8 +31,11 @@ type ResolverConfig struct {
 	// LocalRoot is the local filesystem root LocalPhotoStore is always
 	// constructed against.
 	LocalRoot string
-	// LocalMaxUploadBytes caps a single upload for both the local and (via
-	// S3.MaxUploadBytes below) S3 stores.
+	// LocalMaxUploadBytes caps a single upload written to the local store
+	// only; the S3 store's own cap is configured independently via
+	// S3.MaxUploadBytes below (the two are set to the same operator-
+	// configured limit by convention, not by any propagation this
+	// function performs).
 	LocalMaxUploadBytes int64
 	// S3 configures the S3 store, read only when Backend is
 	// StorageBackendS3.
@@ -62,6 +65,9 @@ type ResolverConfig struct {
 // hanging indefinitely; the local store's construction has no meaningful
 // cancellation point and ignores ctx entirely.
 func NewPhotoStoreResolver(ctx context.Context, cfg ResolverConfig) (mediadomain.PhotoStoreResolver, mediadomain.StorageBackend, error) {
+	if !cfg.Backend.Valid() {
+		return nil, "", fmt.Errorf("media/bootstrap: invalid write-target StorageBackend %q", cfg.Backend)
+	}
 	localStore, err := mediaadapter.NewLocalPhotoStore(cfg.LocalRoot, cfg.LocalMaxUploadBytes)
 	if err != nil {
 		return nil, "", fmt.Errorf("create local photo store: %w", err)

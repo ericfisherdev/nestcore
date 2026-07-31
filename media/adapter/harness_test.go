@@ -52,7 +52,9 @@ CREATE TABLE photo (
 );
 CREATE UNIQUE INDEX photo_household_content_hash_uniq
     ON photo (household_id, content_sha256)
-    WHERE content_sha256 IS NOT NULL;`
+    WHERE content_sha256 IS NOT NULL;
+CREATE INDEX photo_household_id_created_at_idx ON photo (household_id, created_at);
+CREATE INDEX photo_storage_backend_id_idx ON photo (storage_backend, id);`
 
 const dropPhotoTable = `DROP TABLE IF EXISTS photo CASCADE;`
 
