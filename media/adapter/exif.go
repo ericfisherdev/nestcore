@@ -24,11 +24,13 @@ var _ domain.ExifReader = ExifReader{}
 // undecodable EXIF block, or a panic deep in the parser on malformed input
 // is not an error — the photo is simply stored without a taken_at. The
 // recover guard ensures a crafted image cannot crash the caller through the
-// third-party parser. r only needs to support random access to the
-// (typically small) EXIF/TIFF segment the goexif2 parser locates and seeks
-// within — exif.Decode never reads the whole file, so passing a
-// domain.PhotoReader straight through (as PhotoService does) never requires
-// buffering the photo into memory first.
+// third-party parser. r must support random access because EXIF/TIFF fields
+// are addressed by absolute byte offsets; goexif2 seeks directly to the
+// EXIF/TIFF segment it locates rather than buffering the whole input up
+// front, though on an image carrying no EXIF block at all it may scan
+// sequentially through the entire reader looking for one. Passing a
+// domain.PhotoReader straight through (as PhotoService does) still avoids a
+// separate in-memory buffering step either way.
 func (ExifReader) TakenAt(r domain.RandomAccessReader) (taken *time.Time) {
 	defer func() {
 		if rec := recover(); rec != nil {

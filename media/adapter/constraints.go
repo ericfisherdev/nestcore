@@ -55,10 +55,11 @@ func mapFKViolation(err error) error {
 // legacy photo rather than an empty string — matching the partial unique
 // index, which only ever applies where content_sha256 IS NOT NULL.
 func nullableText(s string) *string {
-	if strings.TrimSpace(s) == "" {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
 		return nil
 	}
-	return &s
+	return &trimmed
 }
 
 // row is the read surface shared by pgx.Row and pgx.Rows for scan helpers.

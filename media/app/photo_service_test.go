@@ -489,8 +489,8 @@ func TestPhotoServiceRawServeRedirectsWhenBackendSupportsDirectURL(t *testing.T)
 	repo := newFakePhotoRepo()
 	hh := identity.NewHouseholdID()
 	id := domain.NewPhotoID()
-	repo.store[id] = &domain.Photo{ID: id, HouseholdID: hh, StorageRef: "households/hh/test/aa/x.jpg", StorageBackend: domain.StorageBackendLocal}
-	svc, _ := app.NewPhotoService(testClass, newFakeStoreResolver(domain.StorageBackendLocal, store), domain.StorageBackendLocal, fakeExif{}, repo)
+	repo.store[id] = &domain.Photo{ID: id, HouseholdID: hh, StorageRef: "households/hh/test/aa/x.jpg", StorageBackend: domain.StorageBackendS3}
+	svc, _ := app.NewPhotoService(testClass, newFakeStoreResolver(domain.StorageBackendS3, store), domain.StorageBackendS3, fakeExif{}, repo)
 
 	result, err := svc.RawServe(context.Background(), hh, id)
 	if err != nil {
@@ -618,6 +618,27 @@ func TestPhotoServiceUploadAlwaysWritesToConfiguredBackend(t *testing.T) {
 	}
 	if result.Photo.StorageBackend != domain.StorageBackendS3 {
 		t.Fatalf("created photo StorageBackend = %q, want %q", result.Photo.StorageBackend, domain.StorageBackendS3)
+	}
+}
+
+// TestPhotoServiceUploadWriteStoreNotConfigured covers the write-side
+// mirror of TestPhotoServiceRawServeReturnsErrStoreNotConfiguredForMissingBackend:
+// a resolver that never registered writeBackend's store must fail Upload
+// with a wrapped domain.ErrStoreNotConfigured, before ever calling Create.
+func TestPhotoServiceUploadWriteStoreNotConfigured(t *testing.T) {
+	// Only 'local' is registered, but the service is configured to WRITE to s3.
+	resolver := newFakeStoreResolver(domain.StorageBackendLocal, &fakePhotoStore{})
+	repo := newFakePhotoRepo()
+	svc, err := app.NewPhotoService(testClass, resolver, domain.StorageBackendS3, fakeExif{}, repo)
+	if err != nil {
+		t.Fatalf("NewPhotoService: %v", err)
+	}
+
+	if _, err := svc.Upload(context.Background(), identity.NewHouseholdID(), identity.NewMemberID(), bytes.NewReader([]byte("x"))); !errors.Is(err, domain.ErrStoreNotConfigured) {
+		t.Fatalf("Upload error = %v, want ErrStoreNotConfigured", err)
+	}
+	if len(repo.created) != 0 {
+		t.Fatal("Upload must not create a photo row when the write store cannot be resolved")
 	}
 }
 

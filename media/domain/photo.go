@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ericfisherdev/nestcore/identity/domain"
+	identity "github.com/ericfisherdev/nestcore/identity/domain"
 )
 
 // Accepted image content types — the upload accept-list. Both Photo.Validate
@@ -75,13 +75,13 @@ func (r StorageRef) String() string { return string(r) }
 // a Photo the caller is still building, exactly like CreatedAt.
 type Photo struct {
 	ID             PhotoID
-	HouseholdID    domain.HouseholdID
+	HouseholdID    identity.HouseholdID
 	StorageRef     StorageRef
 	ContentHash    string
 	SizeBytes      int64
 	ContentType    string
 	TakenAt        *time.Time
-	UploadedBy     *domain.MemberID
+	UploadedBy     *identity.MemberID
 	CreatedAt      time.Time
 	StorageBackend StorageBackend
 }
@@ -133,8 +133,8 @@ func (p Photo) Validate() error {
 type PhotoRepository interface {
 	Create(ctx context.Context, photo *Photo) error
 	Get(ctx context.Context, id PhotoID) (*Photo, error)
-	FindByContentHash(ctx context.Context, householdID domain.HouseholdID, hash string) (*Photo, error)
-	ListByHousehold(ctx context.Context, householdID domain.HouseholdID) ([]*Photo, error)
+	FindByContentHash(ctx context.Context, householdID identity.HouseholdID, hash string) (*Photo, error)
+	ListByHousehold(ctx context.Context, householdID identity.HouseholdID) ([]*Photo, error)
 	Delete(ctx context.Context, id PhotoID) error
 
 	// ListAllStorageRefs returns the StorageRef of every photo row stamped

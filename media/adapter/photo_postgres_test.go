@@ -2,6 +2,7 @@ package adapter_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,10 +18,10 @@ import (
 // proof the package doc's canonical table shape promises: nothing here
 // imports Nestova or Nestorage, and the "photo" table this harness built
 // (harness_test.go) lives in a schema neither app owns.
-func seedHouseholdAndMember(t *testing.T, pool *identityadapter.HouseholdRepository, memberRepo *identityadapter.MemberRepository) (identity.HouseholdID, identity.MemberID) {
+func seedHouseholdAndMember(t *testing.T, householdRepo *identityadapter.HouseholdRepository, memberRepo *identityadapter.MemberRepository) (identity.HouseholdID, identity.MemberID) {
 	t.Helper()
 	h := &identity.Household{ID: identity.NewHouseholdID(), Name: "Test Household"}
-	if err := pool.CreateHousehold(testCtx(t), h); err != nil {
+	if err := householdRepo.CreateHousehold(testCtx(t), h); err != nil {
 		t.Fatalf("CreateHousehold: %v", err)
 	}
 	m := &identity.Member{ID: identity.NewMemberID(), HouseholdID: h.ID, DisplayName: "Test Member", Role: identity.RoleAdult}
@@ -264,7 +265,8 @@ func TestPhotoRepositoryMigrateStorageBackend(t *testing.T) {
 	}
 
 	newRef := domain.StorageRef("households/" + hhID.String() + "/test/aa/migrated.jpg")
-	done, err := repo.MigrateStorageBackend(testCtx(t), photo.ID, newRef, domain.StorageBackendS3, "backfilledhash0000000000000000000000000000000000000000000000")
+	backfilledHash := "backfilledhash0000000000000000000000000000000000000000000000"
+	done, err := repo.MigrateStorageBackend(testCtx(t), photo.ID, newRef, domain.StorageBackendS3, backfilledHash)
 	if err != nil {
 		t.Fatalf("MigrateStorageBackend: %v", err)
 	}
@@ -279,15 +281,26 @@ func TestPhotoRepositoryMigrateStorageBackend(t *testing.T) {
 	if got.StorageRef != newRef || got.StorageBackend != domain.StorageBackendS3 {
 		t.Fatalf("Get after migrate = %+v, want ref %s backend %s", got, newRef, domain.StorageBackendS3)
 	}
+	if got.ContentHash != backfilledHash {
+		t.Fatalf("Get after migrate ContentHash = %q, want the backfilled hash %q", got.ContentHash, backfilledHash)
+	}
 
 	// A second migrate attempt on an already-migrated (no longer local) row
-	// is a no-op.
+	// is a no-op: neither the ref, the backend, nor the (already non-NULL)
+	// content hash changes.
 	done, err = repo.MigrateStorageBackend(testCtx(t), photo.ID, "other-ref", domain.StorageBackendS3, "x")
 	if err != nil {
 		t.Fatalf("second MigrateStorageBackend: %v", err)
 	}
 	if done {
 		t.Fatal("second MigrateStorageBackend done = true, want false (row is no longer local-backend)")
+	}
+	unchanged, err := repo.Get(testCtx(t), photo.ID)
+	if err != nil {
+		t.Fatalf("Get after no-op migrate: %v", err)
+	}
+	if unchanged.StorageRef != newRef || unchanged.ContentHash != backfilledHash {
+		t.Fatalf("Get after no-op migrate = %+v, want it unchanged (ref %s, hash %q)", unchanged, newRef, backfilledHash)
 	}
 }
 
@@ -300,7 +313,7 @@ func TestPhotoRepositoryListByBackend(t *testing.T) {
 	repo := adapter.NewPhotoRepository(pool, domain.StorageBackendLocal)
 	var created []*domain.Photo
 	for i := 0; i < 3; i++ {
-		p := newPhoto(hhID, memberID, "households/"+hhID.String()+"/test/aa/photo"+string(rune('a'+i))+".jpg")
+		p := newPhoto(hhID, memberID, fmt.Sprintf("households/%s/test/aa/photo%d.jpg", hhID, i))
 		p.ContentHash = ""
 		if err := repo.Create(testCtx(t), p); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -319,6 +332,18 @@ func TestPhotoRepositoryListByBackend(t *testing.T) {
 	rest, err := repo.ListByBackend(testCtx(t), domain.StorageBackendLocal, page[len(page)-1].ID, 10)
 	if err != nil {
 		t.Fatalf("ListByBackend (second page): %v", err)
+	}
+	seen := make(map[domain.PhotoID]struct{}, len(created))
+	for _, p := range append(append([]*domain.Photo{}, page...), rest...) {
+		seen[p.ID] = struct{}{}
+	}
+	for _, p := range created {
+		if _, ok := seen[p.ID]; !ok {
+			t.Errorf("ListByBackend pages missing created photo %s", p.ID)
+		}
+	}
+	if len(seen) != len(created) {
+		t.Errorf("ListByBackend pages together returned %d distinct photos, want %d", len(seen), len(created))
 	}
 	if len(rest) != len(created)-2 {
 		t.Fatalf("ListByBackend second page = %d, want %d", len(rest), len(created)-2)
