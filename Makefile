@@ -27,7 +27,8 @@ GATED_COVERAGE_OUT := coverage.gated.out
 # test-gated just runs them explicitly, with the env var required.
 GATED_TEST_PACKAGES := \
 	./db/... \
-	./identity/...
+	./identity/... \
+	./media/...
 
 .PHONY: all build test test-gated cover lint fmt hooks hooks-uninstall tidy clean help
 
