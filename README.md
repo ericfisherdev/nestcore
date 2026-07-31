@@ -123,8 +123,11 @@ opted into S3. `SMSConfig` and `EmailConfig` self-gate on their own
 
 nestcore is consumed by two independently versioned binaries (Nestova,
 Nestorage), so a breaking change to one cannot force an immediate, matching
-change in the other. From the first tag both apps depend on, every exported
-package is **additive-only**:
+change in the other. The freeze starts as soon as *either* app takes a real
+dependency on a tag — it does not wait for both: Nestorage already imports
+`v0.2.0` today, so everything that version exports is frozen now, even
+though Nestova's own `go.mod` still only lists an unused, indirect `v0.1.0`
+requirement. From that point, every exported package is **additive-only**:
 
 - No exported function, method, or type signature changes.
 - No exported symbol is removed or renamed.

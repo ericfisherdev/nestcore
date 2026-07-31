@@ -1,8 +1,12 @@
 // This file lives in package cryptotest_test (a black-box test package), not
-// cryptotest itself. That is deliberate: it compiles by importing cryptotest
-// via its full module path exactly as Nestova or Nestorage would, proving the
-// package is usable from outside — not merely from within its own package,
-// where an accidental internal/ nesting could still compile.
+// cryptotest itself. That is deliberate: it exercises cryptotest through its
+// exported API alone, so a helper that quietly leaned on an unexported
+// identifier of its own package would fail to compile here. It doubles as
+// the package's godoc example. Note it cannot prove importability from
+// outside the module: Go's internal rule admits any importer under
+// internal/'s parent, so this file would still compile if the package were
+// nested under internal/. Cross-module importability is proven by
+// Nestorage, which imports this path from its own test suites.
 package cryptotest_test
 
 import (
