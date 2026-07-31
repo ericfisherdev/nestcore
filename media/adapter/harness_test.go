@@ -40,15 +40,20 @@ type photoSchemaMigrator struct{}
 const createPhotoTable = `
 CREATE TABLE photo (
     id               uuid        PRIMARY KEY,
-    household_id     uuid        NOT NULL REFERENCES identity.household(id),
+    household_id     uuid        NOT NULL REFERENCES identity.household(id) ON DELETE CASCADE,
     storage_ref      text        NOT NULL,
-    storage_backend  text        NOT NULL,
-    content_sha256   text,
+    storage_backend  text        NOT NULL
+        CONSTRAINT photo_storage_backend_check CHECK (storage_backend IN ('local', 's3')),
+    content_sha256   text
+        CONSTRAINT photo_content_sha256_format
+        CHECK (content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'),
     size_bytes       bigint      NOT NULL,
     content_type     text        NOT NULL,
     taken_at         timestamptz,
-    uploaded_by      uuid        REFERENCES identity.member(id),
-    created_at       timestamptz NOT NULL DEFAULT now()
+    uploaded_by      uuid,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT photo_uploaded_by_fkey FOREIGN KEY (household_id, uploaded_by)
+        REFERENCES identity.member (household_id, id) ON DELETE SET NULL (uploaded_by)
 );
 CREATE UNIQUE INDEX photo_household_content_hash_uniq
     ON photo (household_id, content_sha256)

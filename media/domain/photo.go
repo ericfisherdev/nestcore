@@ -32,6 +32,17 @@ var acceptedContentTypes = map[string]struct{}{
 // hex characters, the shape PhotoStore.Put always produces.
 var contentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// ValidContentHash reports whether hash is a well-formed content hash: a
+// 64-character lowercase hex sha256, matching the canonical table's
+// photo_content_sha256_format CHECK (see the adapter package doc). Exposed
+// so a caller writing a raw content hash outside Photo.Validate's normal
+// path — PhotoRepository.MigrateStorageBackend's contentHash argument is
+// the only one today — validates against the exact same pattern, rather
+// than each such caller keeping its own copy of the regexp.
+func ValidContentHash(hash string) bool {
+	return contentHashPattern.MatchString(hash)
+}
+
 // Photo errors.
 var (
 	// ErrPhotoNotFound is returned when a photo does not exist (or belongs

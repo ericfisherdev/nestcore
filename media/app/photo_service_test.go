@@ -65,6 +65,13 @@ type fakePhotoStore struct {
 	// directURL backs SupportsDirectURL — false (LocalPhotoStore-like)
 	// unless a test opts into the S3-like redirect path.
 	directURL bool
+	// listObjects/listErr back ListObjects (domain.ObjectLister) — see
+	// reaper_service_test.go. fakePhotoStore satisfies both PhotoStore and
+	// ObjectLister on one value because NewReaperService now derives its
+	// lister from store via a type assertion, mirroring how S3PhotoStore
+	// implements both in production.
+	listObjects map[domain.PhotoClass][]domain.ObjectInfo
+	listErr     error
 }
 
 // Put hashes the bytes it's given and derives Ref from the hash — like the
