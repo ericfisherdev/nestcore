@@ -119,6 +119,39 @@ application calls `LoadS3`/`S3Config.Validate` only when its own selector
 opted into S3. `SMSConfig` and `EmailConfig` self-gate on their own
 `Enabled` field instead, since that field travels with the type.
 
+## Compatibility and tagging
+
+nestcore is consumed by two independently versioned binaries (Nestova,
+Nestorage), so a breaking change to one cannot force an immediate, matching
+change in the other. From the first tag both apps depend on, every exported
+package is **additive-only**:
+
+- No exported function, method, or type signature changes.
+- No exported symbol is removed or renamed.
+- New behavior is added through new exported names or new options
+  (functional options, new struct fields with safe zero values), never by
+  changing what an existing name does.
+
+Anything that must break an existing contract requires a coordinated version
+bump of both consuming apps' `go.mod` requirements in the same change window
+— never a silent breaking change released under an existing major version.
+This is also why exported surfaces stay deliberately minimal (see the
+Interface Segregation principle applied throughout this module): the less
+that is exported, the less there is to freeze.
+
+Releases are tagged `vX.Y.Z` following semantic versioning:
+
+- **v0.x** (current): pre-1.0, but the additive-only rule above still
+  applies from the first tag either app depends on — v0 does not license
+  breaking changes here, unlike the usual SemVer convention for `v0`.
+- **v1.0.0** and beyond: reserved for the point both apps' platform-package
+  dependency is considered stable enough to commit to SemVer's normal
+  breaking-change-means-major-bump contract.
+
+Tag a new version after merging to `main` once its changes are ready to be
+picked up by a consumer; a consumer adopts it by bumping the version in its
+own `go.mod`, not by tracking `main`.
+
 ## License
 
 [AGPL-3.0](LICENSE), matching both consumers (Nestova, Nestorage).
