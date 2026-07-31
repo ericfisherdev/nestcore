@@ -3,6 +3,7 @@ package adapter_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,26 @@ func TestPhotoRepositoryCreateUnknownUploaderMapsToIdentityError(t *testing.T) {
 	photo := newPhoto(h.ID, identity.NewMemberID(), "households/"+h.ID.String()+"/test/aa/one.jpg")
 	if err := repo.Create(testCtx(t), photo); !errors.Is(err, identity.ErrMemberNotFound) {
 		t.Errorf("Create(unknown uploader) error = %v, want identity.ErrMemberNotFound", err)
+	}
+}
+
+// TestPhotoRepositoryCreateCrossHouseholdUploaderMapsToIdentityError covers
+// the composite (household_id, uploaded_by) tenant-consistency FK: a
+// member who genuinely exists, but belongs to a DIFFERENT household than
+// the photo's own household_id, must be rejected exactly like an unknown
+// member — a plain single-column uploaded_by FK would have let this
+// through.
+func TestPhotoRepositoryCreateCrossHouseholdUploaderMapsToIdentityError(t *testing.T) {
+	pool := newTestPool(t)
+	households := identityadapter.NewHouseholdRepository(pool)
+	members := identityadapter.NewMemberRepository(pool)
+	photoHousehold, _ := seedHouseholdAndMember(t, households, members)
+	_, otherMember := seedHouseholdAndMember(t, households, members)
+
+	repo := adapter.NewPhotoRepository(pool, domain.StorageBackendLocal)
+	photo := newPhoto(photoHousehold, otherMember, "households/"+photoHousehold.String()+"/test/aa/one.jpg")
+	if err := repo.Create(testCtx(t), photo); !errors.Is(err, identity.ErrMemberNotFound) {
+		t.Errorf("Create(cross-household uploader) error = %v, want identity.ErrMemberNotFound", err)
 	}
 }
 
@@ -251,6 +272,28 @@ func TestPhotoRepositoryListAllStorageRefsAndExistsByStorageRef(t *testing.T) {
 	}
 }
 
+// TestPhotoRepositoryMigrateStorageBackendRejectsInvalidArguments covers
+// MigrateStorageBackend's own argument validation: an invalid newBackend
+// and a non-blank, malformed contentHash must both be rejected before any
+// UPDATE runs, rather than persisting a value only ParseStorageBackend
+// (or the content-hash format) would catch later, on an unrelated read.
+func TestPhotoRepositoryMigrateStorageBackendRejectsInvalidArguments(t *testing.T) {
+	repo := adapter.NewPhotoRepository(newTestPool(t), domain.StorageBackendLocal)
+	id := domain.NewPhotoID()
+
+	if _, err := repo.MigrateStorageBackend(testCtx(t), id, "ref", domain.StorageBackend("azure-blob"), ""); err == nil {
+		t.Fatal("MigrateStorageBackend with an invalid newBackend = nil error, want error")
+	}
+	if _, err := repo.MigrateStorageBackend(testCtx(t), id, "ref", domain.StorageBackendS3, "not-a-hash"); err == nil {
+		t.Fatal("MigrateStorageBackend with a malformed contentHash = nil error, want error")
+	}
+	// A blank contentHash is the legitimate "nothing to backfill" case and
+	// must NOT be rejected — it just reports done=false for an unknown id.
+	if _, err := repo.MigrateStorageBackend(testCtx(t), id, "ref", domain.StorageBackendS3, ""); err != nil {
+		t.Fatalf("MigrateStorageBackend with a blank contentHash: %v", err)
+	}
+}
+
 func TestPhotoRepositoryMigrateStorageBackend(t *testing.T) {
 	pool := newTestPool(t)
 	households := identityadapter.NewHouseholdRepository(pool)
@@ -265,7 +308,7 @@ func TestPhotoRepositoryMigrateStorageBackend(t *testing.T) {
 	}
 
 	newRef := domain.StorageRef("households/" + hhID.String() + "/test/aa/migrated.jpg")
-	backfilledHash := "backfilledhash0000000000000000000000000000000000000000000000"
+	backfilledHash := strings.Repeat("1", 64)
 	done, err := repo.MigrateStorageBackend(testCtx(t), photo.ID, newRef, domain.StorageBackendS3, backfilledHash)
 	if err != nil {
 		t.Fatalf("MigrateStorageBackend: %v", err)
@@ -288,7 +331,7 @@ func TestPhotoRepositoryMigrateStorageBackend(t *testing.T) {
 	// A second migrate attempt on an already-migrated (no longer local) row
 	// is a no-op: neither the ref, the backend, nor the (already non-NULL)
 	// content hash changes.
-	done, err = repo.MigrateStorageBackend(testCtx(t), photo.ID, "other-ref", domain.StorageBackendS3, "x")
+	done, err = repo.MigrateStorageBackend(testCtx(t), photo.ID, "other-ref", domain.StorageBackendS3, strings.Repeat("2", 64))
 	if err != nil {
 		t.Fatalf("second MigrateStorageBackend: %v", err)
 	}

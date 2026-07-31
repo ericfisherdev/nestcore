@@ -75,3 +75,14 @@ func TestPhotoValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestValidContentHash(t *testing.T) {
+	if !domain.ValidContentHash(validSha256Hex) {
+		t.Errorf("ValidContentHash(%q) = false, want true", validSha256Hex)
+	}
+	for _, hash := range []string{"", "not-a-hash", strings.ToUpper(validSha256Hex), validSha256Hex[:63]} {
+		if domain.ValidContentHash(hash) {
+			t.Errorf("ValidContentHash(%q) = true, want false", hash)
+		}
+	}
+}

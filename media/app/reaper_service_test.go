@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -20,64 +21,87 @@ var (
 	testReaperClassB = domain.RegisterPhotoClass("test_reaper_class_b")
 )
 
-// fakeObjectLister fakes domain.ObjectLister: a fixed set of objects per
-// class, so a test can shape exactly what "the bucket contains" without a
-// real object store. listErr, when set, makes ListObjects fail regardless
-// of class.
-type fakeObjectLister struct {
-	objects map[domain.PhotoClass][]domain.ObjectInfo
-	listErr error
-}
-
-func (f *fakeObjectLister) ListObjects(_ context.Context, class domain.PhotoClass) ([]domain.ObjectInfo, error) {
+// ListObjects satisfies domain.ObjectLister on fakePhotoStore (declared in
+// photo_service_test.go): NewReaperService derives its lister from the
+// store it is given via a type assertion (mirroring production, where
+// S3PhotoStore implements both PhotoStore and ObjectLister on one value),
+// so these tests configure listObjects/listErr on the SAME fakePhotoStore
+// they pass as the store, rather than a separate lister type.
+func (f *fakePhotoStore) ListObjects(_ context.Context, class domain.PhotoClass) ([]domain.ObjectInfo, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.objects[class], nil
+	return f.listObjects[class], nil
 }
 
 const testGraceWindow = 24 * time.Hour
 
-func newTestReaper(t *testing.T, lister *fakeObjectLister, store *fakePhotoStore, sources map[domain.PhotoClass]app.ReapableSource) *app.ReaperService {
+func newTestReaper(t *testing.T, store *fakePhotoStore, sources map[domain.PhotoClass]app.ReapableSource) *app.ReaperService {
 	t.Helper()
-	r, err := app.NewReaperService(lister, store, domain.StorageBackendLocal, sources, testGraceWindow)
+	r, err := app.NewReaperService(store, domain.StorageBackendLocal, sources, testGraceWindow)
 	if err != nil {
 		t.Fatalf("NewReaperService: %v", err)
 	}
 	return r
 }
 
-// TestNewReaperServiceValidatesDependencies covers the nil-dependency,
+// TestNewReaperServiceValidatesDependencies covers the nil-store,
 // invalid-backend, empty-sources, and non-positive-graceWindow guards.
 func TestNewReaperServiceValidatesDependencies(t *testing.T) {
-	lister := &fakeObjectLister{}
 	store := &fakePhotoStore{}
 	sources := map[domain.PhotoClass]app.ReapableSource{testReaperClassA: newFakePhotoRepo()}
 
 	cases := []struct {
 		name    string
-		lister  domain.ObjectLister
 		store   domain.PhotoStore
 		backend domain.StorageBackend
 		sources map[domain.PhotoClass]app.ReapableSource
 		grace   time.Duration
 	}{
-		{"nil lister", nil, store, domain.StorageBackendLocal, sources, testGraceWindow},
-		{"nil store", lister, nil, domain.StorageBackendLocal, sources, testGraceWindow},
-		{"invalid backend", lister, store, domain.StorageBackend("azure-blob"), sources, testGraceWindow},
-		{"empty sources", lister, store, domain.StorageBackendLocal, map[domain.PhotoClass]app.ReapableSource{}, testGraceWindow},
-		{"nil source value", lister, store, domain.StorageBackendLocal, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: nil}, testGraceWindow},
-		{"zero grace window", lister, store, domain.StorageBackendLocal, sources, 0},
-		{"negative grace window", lister, store, domain.StorageBackendLocal, sources, -time.Minute},
+		{"nil store", nil, domain.StorageBackendLocal, sources, testGraceWindow},
+		{"invalid backend", store, domain.StorageBackend("azure-blob"), sources, testGraceWindow},
+		{"empty sources", store, domain.StorageBackendLocal, map[domain.PhotoClass]app.ReapableSource{}, testGraceWindow},
+		{"nil source value", store, domain.StorageBackendLocal, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: nil}, testGraceWindow},
+		{"zero grace window", store, domain.StorageBackendLocal, sources, 0},
+		{"negative grace window", store, domain.StorageBackendLocal, sources, -time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := app.NewReaperService(tc.lister, tc.store, tc.backend, tc.sources, tc.grace); err == nil {
+			if _, err := app.NewReaperService(tc.store, tc.backend, tc.sources, tc.grace); err == nil {
 				t.Fatal("NewReaperService should have failed")
 			}
 		})
 	}
 }
+
+// TestNewReaperServiceRejectsStoreWithoutObjectLister proves the
+// constructor's type assertion actually gates construction: nonListingStore
+// satisfies domain.PhotoStore but deliberately not domain.ObjectLister.
+func TestNewReaperServiceRejectsStoreWithoutObjectLister(t *testing.T) {
+	sources := map[domain.PhotoClass]app.ReapableSource{testReaperClassA: newFakePhotoRepo()}
+	if _, err := app.NewReaperService(nonListingStore{}, domain.StorageBackendLocal, sources, testGraceWindow); err == nil {
+		t.Fatal("NewReaperService with a store that does not implement ObjectLister = nil error, want error")
+	}
+}
+
+// nonListingStore implements domain.PhotoStore's minimal surface only —
+// deliberately NOT domain.ObjectLister (LocalPhotoStore's real-world
+// shape) — so NewReaperService's type assertion has something real to
+// fail against.
+type nonListingStore struct{}
+
+func (nonListingStore) Put(context.Context, identity.HouseholdID, domain.PhotoClass, io.Reader) (domain.PutResult, error) {
+	return domain.PutResult{}, nil
+}
+
+func (nonListingStore) Open(context.Context, domain.StorageRef) (domain.PhotoReader, error) {
+	return nil, domain.ErrPhotoNotFound
+}
+func (nonListingStore) Delete(context.Context, domain.StorageRef) error { return nil }
+func (nonListingStore) URL(context.Context, domain.StorageRef, time.Duration) (string, error) {
+	return "", nil
+}
+func (nonListingStore) SupportsDirectURL() bool { return false }
 
 // TestNewReaperServiceRejectsUnregisteredClassKey covers the guard that
 // every map key must be a class actually obtained from
@@ -85,7 +109,7 @@ func TestNewReaperServiceValidatesDependencies(t *testing.T) {
 func TestNewReaperServiceRejectsUnregisteredClassKey(t *testing.T) {
 	var zero domain.PhotoClass
 	sources := map[domain.PhotoClass]app.ReapableSource{zero: newFakePhotoRepo()}
-	if _, err := app.NewReaperService(&fakeObjectLister{}, &fakePhotoStore{}, domain.StorageBackendLocal, sources, testGraceWindow); err == nil {
+	if _, err := app.NewReaperService(&fakePhotoStore{}, domain.StorageBackendLocal, sources, testGraceWindow); err == nil {
 		t.Fatal("NewReaperService with an unregistered class key = nil error, want error")
 	}
 }
@@ -102,15 +126,14 @@ func TestReaperDeletesUnreferencedObjectsPastGraceWindow(t *testing.T) {
 	photos := newFakePhotoRepo()
 	photos.store[referenced.ID] = referenced
 
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {
 			{Key: referenced.StorageRef, LastModified: old},
 			{Key: domain.StorageRef("households/" + hh.String() + "/test_reaper_class_a/bb/orphan.jpg"), LastModified: old},
 		},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 	result, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -132,14 +155,13 @@ func TestReaperSkipsObjectsWithinGraceWindow(t *testing.T) {
 	recent := now.Add(-testGraceWindow / 2)
 
 	photos := newFakePhotoRepo()
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {
 			{Key: domain.StorageRef("households/hh/test_reaper_class_a/bb/fresh-orphan.jpg"), LastModified: recent},
 		},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 	result, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -171,12 +193,11 @@ func TestReaperCrossClassReferenceProtectsObject(t *testing.T) {
 	classBRepo.store[crossRow.ID] = crossRow
 	classARepo := newFakePhotoRepo()
 
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {{Key: crossRef, LastModified: old}},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{
 		testReaperClassA: classARepo,
 		testReaperClassB: classBRepo,
 	})
@@ -207,12 +228,11 @@ func TestReaperTOCTOURecheckProtectsLateCommit(t *testing.T) {
 	// as referenced — simulating a row that committed after the snapshot.
 	photos.existsOverride = map[domain.StorageRef]bool{ref: true}
 
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {{Key: ref, LastModified: old}},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 	result, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -237,12 +257,11 @@ func TestReaperDryRunPreviewsWithoutDeleting(t *testing.T) {
 	orphan := domain.StorageRef("households/hh/test_reaper_class_a/bb/orphan.jpg")
 
 	photos := newFakePhotoRepo()
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {{Key: orphan, LastModified: old}},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 	result, err := r.DryRun(context.Background(), now)
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
@@ -269,12 +288,11 @@ func TestReaperDeletesExactlyAtGraceWindowBoundary(t *testing.T) {
 	ref := domain.StorageRef("households/hh/test_reaper_class_a/aa/boundary.jpg")
 
 	photos := newFakePhotoRepo()
-	lister := &fakeObjectLister{objects: map[domain.PhotoClass][]domain.ObjectInfo{
+	store := &fakePhotoStore{listObjects: map[domain.PhotoClass][]domain.ObjectInfo{
 		testReaperClassA: {{Key: ref, LastModified: cutoff}},
 	}}
-	store := &fakePhotoStore{}
 
-	r := newTestReaper(t, lister, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 	result, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -292,9 +310,9 @@ func TestReaperDeletesExactlyAtGraceWindowBoundary(t *testing.T) {
 // ObjectLister error must propagate as an error, never be silently
 // swallowed into an empty/zero result.
 func TestReaperRunPropagatesListerError(t *testing.T) {
-	lister := &fakeObjectLister{listErr: errors.New("bucket unreachable")}
+	store := &fakePhotoStore{listErr: errors.New("bucket unreachable")}
 	photos := newFakePhotoRepo()
-	r := newTestReaper(t, lister, &fakePhotoStore{}, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 
 	if _, err := r.Run(context.Background(), time.Now()); err == nil {
 		t.Fatal("Run should fail when the lister errors")
@@ -302,9 +320,9 @@ func TestReaperRunPropagatesListerError(t *testing.T) {
 }
 
 func TestReaperDryRunPropagatesListerError(t *testing.T) {
-	lister := &fakeObjectLister{listErr: errors.New("bucket unreachable")}
+	store := &fakePhotoStore{listErr: errors.New("bucket unreachable")}
 	photos := newFakePhotoRepo()
-	r := newTestReaper(t, lister, &fakePhotoStore{}, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
+	r := newTestReaper(t, store, map[domain.PhotoClass]app.ReapableSource{testReaperClassA: photos})
 
 	if _, err := r.DryRun(context.Background(), time.Now()); err == nil {
 		t.Fatal("DryRun should fail when the lister errors")

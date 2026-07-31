@@ -22,15 +22,27 @@
 //
 //	CREATE TABLE photo (
 //	    id               uuid        PRIMARY KEY,
-//	    household_id     uuid        NOT NULL REFERENCES identity.household(id),
+//	    household_id     uuid        NOT NULL REFERENCES identity.household(id) ON DELETE CASCADE,
 //	    storage_ref      text        NOT NULL,
-//	    storage_backend  text        NOT NULL,
-//	    content_sha256   text,
+//	    storage_backend  text        NOT NULL
+//	        CONSTRAINT photo_storage_backend_check CHECK (storage_backend IN ('local', 's3')),
+//	    content_sha256   text
+//	        CONSTRAINT photo_content_sha256_format
+//	        CHECK (content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'),
 //	    size_bytes       bigint      NOT NULL,
 //	    content_type     text        NOT NULL,
 //	    taken_at         timestamptz,
-//	    uploaded_by      uuid        REFERENCES identity.member(id),
-//	    created_at       timestamptz NOT NULL DEFAULT now()
+//	    uploaded_by      uuid,
+//	    created_at       timestamptz NOT NULL DEFAULT now(),
+//	    -- Tenant consistency: an uploader must belong to the photo's OWN
+//	    -- household, never another one identity itself would happily
+//	    -- allow a bare uploaded_by REFERENCES identity.member(id) to miss.
+//	    -- Targets identity.member's member_household_id_id_uniq (see that
+//	    -- migration's own doc for the composite-FK pattern this mirrors);
+//	    -- MATCH SIMPLE (Postgres's default) skips the check entirely when
+//	    -- uploaded_by IS NULL, so an anonymous/system upload is unaffected.
+//	    CONSTRAINT photo_uploaded_by_fkey FOREIGN KEY (household_id, uploaded_by)
+//	        REFERENCES identity.member (household_id, id) ON DELETE SET NULL (uploaded_by)
 //	);
 //	CREATE UNIQUE INDEX photo_household_content_hash_uniq
 //	    ON photo (household_id, content_sha256)
@@ -46,10 +58,30 @@
 // unique index (a missing plain index only costs query performance, never
 // correctness).
 //
-// The household_id and uploaded_by foreign keys must be declared inline
-// (unnamed) so Postgres auto-names them photo_household_id_fkey and
-// photo_uploaded_by_fkey — the names PhotoRepository's constraint mapping
-// matches against (see constraints.go). content_sha256 is nullable (a
+// household_id's foreign key must be declared inline (unnamed) so Postgres
+// auto-names it photo_household_id_fkey — the name PhotoRepository's
+// constraint mapping matches against (see constraints.go) — and cascades
+// deletes, mirroring identity.member's own cascade from identity.household
+// (a household delete must not be blocked by surviving photo rows).
+// uploaded_by's foreign key, by contrast, is EXPLICITLY named
+// photo_uploaded_by_fkey (constraints.go matches the same name either way)
+// because it must be the composite (household_id, uploaded_by) form above,
+// not a plain single-column reference — Postgres does not auto-name a
+// multi-column FK usefully, so this one has to be spelled out. It also sets
+// NULL only, not CASCADE, on delete: Photo.UploadedBy is documented as
+// "nilled (not deleted) if that member is removed so the photo survives",
+// and ON DELETE SET NULL (uploaded_by) is what makes that true — a plain
+// CASCADE on this column would delete the photo along with its uploader,
+// which is exactly the outcome that doc line rules out.
+//
+// storage_backend's CHECK restricts it to domain.StorageBackend's own
+// known values, and content_sha256's CHECK enforces the same 64-character
+// lowercase-hex-sha256 shape domain.Photo.Validate and
+// PhotoRepository.MigrateStorageBackend's own argument validation expect —
+// both mirror Nestova's original photo_storage_backend_check and
+// photo_content_sha256_format constraints, so a row that violates either
+// can only originate from a bypass of this package's own write paths, not
+// from an ordinarily-configured deployment. content_sha256 is nullable (a
 // legacy photo predating content-hash dedup never matches a duplicate
 // check); the partial unique index's WHERE clause is what makes that safe.
 // An application is free to add its OWN extra columns (e.g. a

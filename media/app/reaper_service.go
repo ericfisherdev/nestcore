@@ -70,20 +70,23 @@ type ReaperService struct {
 }
 
 // NewReaperService constructs a ReaperService bound to backend — the
-// StorageBackend lister/store actually sweep — over sources, one
-// ReapableSource per domain.PhotoClass to walk. Returns an error instead of
-// panicking on a nil dependency, an invalid backend, an empty or
-// invalid-keyed sources map, or a non-positive graceWindow.
+// StorageBackend store actually sweeps — over sources, one ReapableSource
+// per domain.PhotoClass to walk. The lister this type's own doc promises
+// ("app.ReaperService type-asserts for it") is derived from store itself
+// via domain.ObjectLister, not accepted as a separate parameter: a
+// caller-supplied lister bound to a DIFFERENT backend than store would
+// make Run delete objects the wrong backend listed, and deriving it from
+// store makes that mismatch unrepresentable. Returns an error instead of
+// panicking on a nil store, a store that does not also implement
+// domain.ObjectLister, an invalid backend, an empty or invalid-keyed
+// sources map, or a non-positive graceWindow.
 func NewReaperService(
-	lister domain.ObjectLister,
 	store domain.PhotoStore,
 	backend domain.StorageBackend,
 	sources map[domain.PhotoClass]ReapableSource,
 	graceWindow time.Duration,
 ) (*ReaperService, error) {
 	switch {
-	case lister == nil:
-		return nil, errors.New("media/app: NewReaperService requires a non-nil ObjectLister")
 	case store == nil:
 		return nil, errors.New("media/app: NewReaperService requires a non-nil PhotoStore")
 	case !backend.Valid():
@@ -92,6 +95,10 @@ func NewReaperService(
 		return nil, errors.New("media/app: NewReaperService requires at least one PhotoClass source")
 	case graceWindow <= 0:
 		return nil, fmt.Errorf("media/app: NewReaperService requires a positive graceWindow, got %v", graceWindow)
+	}
+	lister, ok := store.(domain.ObjectLister)
+	if !ok {
+		return nil, fmt.Errorf("media/app: NewReaperService requires a PhotoStore that also implements domain.ObjectLister; %T does not", store)
 	}
 	classes := make([]domain.PhotoClass, 0, len(sources))
 	for class, source := range sources {

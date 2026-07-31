@@ -194,8 +194,23 @@ func (r *PhotoRepository) ListByBackend(ctx context.Context, backend domain.Stor
 
 // MigrateStorageBackend flips a local-backend photo row onto newBackend,
 // writing newRef as its new storage_ref and, ONLY when the row's
-// content_sha256 is currently NULL, backfilling it with contentHash.
+// content_sha256 is currently NULL, backfilling it with contentHash. A
+// non-blank contentHash must be a well-formed content hash (a blank one is
+// the legitimate "nothing to backfill" case, mapped to SQL NULL by
+// nullableText and left alone by the COALESCE below) — both arguments are
+// validated here because this method is the one write path the shared
+// EXIF/upload validation pipeline never runs through: a bad newBackend or
+// contentHash would otherwise persist silently and only surface later, as
+// a scan failure on this or any other row in the same ListByHousehold
+// page (see PhotoRepository's own doc on ParseStorageBackend's boundary
+// check).
 func (r *PhotoRepository) MigrateStorageBackend(ctx context.Context, id domain.PhotoID, newRef domain.StorageRef, newBackend domain.StorageBackend, contentHash string) (bool, error) {
+	if !newBackend.Valid() {
+		return false, fmt.Errorf("media/adapter: migrate photo storage backend: invalid newBackend %q", newBackend)
+	}
+	if contentHash != "" && !domain.ValidContentHash(contentHash) {
+		return false, fmt.Errorf("media/adapter: migrate photo storage backend: content hash must be a 64-character lowercase hex sha256, got %q", contentHash)
+	}
 	const q = `
 		UPDATE photo
 		   SET storage_ref = $2, storage_backend = $3, content_sha256 = COALESCE(content_sha256, $4)
