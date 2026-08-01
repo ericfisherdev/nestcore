@@ -30,7 +30,7 @@ GATED_TEST_PACKAGES := \
 	./identity/... \
 	./media/...
 
-.PHONY: all build test test-gated cover lint fmt hooks hooks-uninstall tidy clean help
+.PHONY: all build generate test test-gated cover lint fmt hooks hooks-uninstall tidy clean help
 
 ## all: default aggregate target (alias for build)
 all: build
@@ -38,6 +38,10 @@ all: build
 ## build: type-check the module (a library emits no binary artifact)
 build:
 	go build ./...
+
+## generate: generate Go code from .templ files (ui/components)
+generate:
+	go tool templ generate
 
 ## test: run the test suite with the race detector and write a coverage profile
 test:
@@ -61,8 +65,9 @@ cover: test
 lint:
 	golangci-lint run
 
-## fmt: format Go sources (golangci-lint runs gofumpt + goimports)
+## fmt: format templ and Go sources (golangci-lint runs gofumpt + goimports)
 fmt:
+	go tool templ fmt .
 	golangci-lint fmt
 
 ## hooks: install the Lefthook Git hooks (pre-commit, pre-push)

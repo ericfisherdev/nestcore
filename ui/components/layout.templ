@@ -1,0 +1,171 @@
+// Package components ships the Hearth shell's structural templ components:
+// the parameterized Layout (264px sidebar plus main) and NavPill. Palette,
+// PWA manifest wiring, and app-specific motion are deliberately NOT modeled
+// here — see ShellProps's HeadExtras, SidebarBrand, SidebarExtra, and
+// SidebarFooter slots, which are where each app injects that content.
+package components
+
+import "github.com/ericfisherdev/nestcore/ui/static"
+
+// NavItem is a sidebar navigation entry. Active marks the current page.
+type NavItem struct {
+	Label  string
+	Href   string
+	Active bool
+}
+
+// ShellProps configures the Hearth shell (the fixed 264px sidebar plus main
+// content area shared by every Hearth app). Token NAMES referenced by the
+// shell's CSS are the same across apps; token VALUES, PWA identity, and
+// motion scripts are each app's own and are injected through the slots
+// below rather than modeled here.
+type ShellProps struct {
+	// AppName renders in <title>, and in the sidebar brand row when
+	// SidebarBrand is nil.
+	AppName string
+	// FaviconHref is the favicon <link> target, e.g. "/static/favicon.svg".
+	// Empty renders no favicon link.
+	FaviconHref string
+	// ThemeColor sets the meta theme-color tag, e.g. "#6f8c6a". Empty
+	// renders no theme-color meta.
+	ThemeColor string
+	// StylesheetHref is the compiled Tailwind CSS bundle this app built from
+	// ui/css/theme.css plus its own palette (e.g. "/static/css/app.css").
+	StylesheetHref string
+	// HeadExtras renders after the HTMX script and before Alpine's — the
+	// position an app's own PWA manifest link, service worker registration,
+	// or Alpine-extension scripts (which must load before alpine.min.js;
+	// see ui/static's doc) need. Nil renders nothing.
+	HeadExtras templ.Component
+	// SidebarBrand renders the sidebar's brand row (logo mark plus name).
+	// Nil falls back to a plain AppName label.
+	SidebarBrand templ.Component
+	// SidebarExtra renders below primary nav — member/owner lists, a mini
+	// calendar, and similar per-app sidebar content. Nil renders nothing.
+	SidebarExtra templ.Component
+	// SidebarFooter renders pinned to the sidebar's bottom cluster (logout
+	// form, cross-app links, and similar). Nil renders nothing.
+	SidebarFooter templ.Component
+}
+
+// Layout renders the Hearth shell — a fixed left sidebar plus the main
+// content area — around content. Use it with the render seam, binding props
+// and nav into the layout func:
+//
+//	layout := func(c templ.Component) templ.Component { return components.Layout(props, nav, c) }
+//	render.Page(ctx, w, r, layout, content)
+templ Layout(props ShellProps, nav []NavItem, content templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ props.AppName }</title>
+			if props.FaviconHref != "" {
+				<link rel="icon" href={ templ.SafeURL(props.FaviconHref) }/>
+			}
+			if props.ThemeColor != "" {
+				<meta name="theme-color" content={ props.ThemeColor }/>
+			}
+			if props.StylesheetHref != "" {
+				<link rel="stylesheet" href={ templ.SafeURL(props.StylesheetHref) }/>
+			}
+			<!-- htmx by default never swaps a 4xx/5xx response into the DOM (see
+			     htmx's own QUIRKS.md, "By Default 4xx & 5xx Responses Do Not
+			     Swap"). This shell configures htmx to swap 422 too, since a
+			     validation-style rejection at 422 is a common pattern across
+			     both apps for re-rendering a fragment with an inline error
+			     message; every other status keeps its default (no-swap-on-error)
+			     behavior. -->
+			<meta
+				name="htmx-config"
+				content={ `{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":false}]}` }
+			/>
+			<script src={ static.MountPath + "js/htmx.min.js" } defer></script>
+			if props.HeadExtras != nil {
+				@props.HeadExtras
+			}
+			<!-- Alpine dispatches 'alpine:init' as soon as ITS OWN deferred script
+			     runs — not on DOMContentLoaded — so any extension script that
+			     registers Alpine.data must load and run before this tag (that's
+			     why HeadExtras is positioned immediately above, not below). -->
+			<script src={ static.MountPath + "js/alpine.min.js" } defer></script>
+		</head>
+		<body
+			class="bg-canvas font-sans text-text min-h-screen"
+			x-data="{ open: false }"
+			@keydown.escape.window="if (open) { open = false; $refs.navToggle.focus() }"
+		>
+			<a
+				href="#main-content"
+				class="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded-control focus:bg-primary focus:px-3 focus:py-2 focus:text-white"
+			>Skip to content</a>
+			<!-- Narrow-screen drawer toggle (hidden once the sidebar is fixed).
+			     Opening moves focus into the drawer; closing returns it here. -->
+			<button
+				type="button"
+				x-ref="navToggle"
+				class="fixed left-3 top-3 z-40 inline-flex h-10 w-10 items-center justify-center rounded-control bg-sidebar shadow-sm md:hidden"
+				@click="open = true; $nextTick(() => $refs.navPanel.focus())"
+				aria-label="Open navigation"
+				aria-controls="sidebar"
+				:aria-expanded="open"
+			>
+				<span aria-hidden="true">&#9776;</span>
+			</button>
+			<!-- Click-away overlay shown with the drawer on narrow screens. This is
+			     a pointer-only convenience: it carries no accessible name and isn't
+			     reachable by keyboard, so it's marked aria-hidden to keep assistive
+			     tech from exposing it as an ambiguous interactive element. Keyboard
+			     users close the drawer via the Escape handler on <body> above. -->
+			<div
+				x-show="open"
+				x-cloak
+				@click="open = false; $refs.navToggle.focus()"
+				class="fixed inset-0 z-30 bg-text/30 md:hidden"
+				aria-hidden="true"
+			></div>
+			@sidebar(props, nav)
+			<!-- inert disables the main content behind the open drawer so keyboard
+			     focus cannot escape the modal drawer (WCAG 2.4.3). -->
+			<main id="main-content" class="bg-surface min-h-screen md:ml-[var(--hearth-sidebar-width)]" :inert="open">
+				@content
+			</main>
+		</body>
+	</html>
+}
+
+// sidebar is the fixed 264px navigation rail; on narrow screens it slides in
+// as an Alpine-controlled drawer.
+templ sidebar(props ShellProps, nav []NavItem) {
+	<aside
+		id="sidebar"
+		x-ref="navPanel"
+		tabindex="-1"
+		class="fixed inset-y-0 left-0 z-40 flex w-[var(--hearth-sidebar-width)] -translate-x-full flex-col gap-4 overflow-y-auto border-r border-border-strong bg-sidebar p-4 transition-transform outline-none md:translate-x-0"
+		:class="open ? 'translate-x-0' : ''"
+	>
+		if props.SidebarBrand != nil {
+			@props.SidebarBrand
+		} else {
+			<div class="flex items-center gap-2 px-1">
+				<span class="text-lg font-semibold">{ props.AppName }</span>
+			</div>
+		}
+		<nav class="flex flex-col gap-1" aria-label="Primary">
+			for _, item := range nav {
+				@NavPill(item.Label, item.Href, item.Active)
+			}
+		</nav>
+		if props.SidebarExtra != nil {
+			@props.SidebarExtra
+		}
+		<!-- mt-auto pins the footer slot to the sidebar's bottom cluster
+		     regardless of how much the sections above grow. -->
+		if props.SidebarFooter != nil {
+			<div class="mt-auto flex flex-col gap-2">
+				@props.SidebarFooter
+			</div>
+		}
+	</aside>
+}
