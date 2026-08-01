@@ -1,0 +1,94 @@
+/*
+ * Hearth shell Tailwind v4 theme snippet (NSTR-128).
+ *
+ * This file maps Tailwind utilities onto the shared --hearth-* token NAMES —
+ * it declares no hex values of its own. Each app imports this file ahead of
+ * its own palette file, which declares the same names against :root with its
+ * own values:
+ *
+ *   @import "tailwindcss" source(none);
+ *   @import "<path-to-nestcore>/ui/css/theme.css";
+ *   @import "./palette.css";   // this app's own --hearth-* values
+ *
+ * Token-name contract (see package ui's doc for the additive-only rule):
+ *
+ *   Geometry   --hearth-sidebar-width         shared literal (264px); not
+ *                                              app-specific, so it is set
+ *                                              directly below rather than
+ *                                              deferred to a palette file.
+ *   Surfaces   --hearth-canvas, --hearth-surface, --hearth-surface-raised,
+ *              --hearth-sidebar, --hearth-sidebar-accent
+ *   Lines      --hearth-border, --hearth-border-strong, --hearth-divider,
+ *              --hearth-divider-subtle
+ *   Text       --hearth-text, --hearth-text-secondary, --hearth-text-muted,
+ *              --hearth-text-faint
+ *   Brand      --hearth-primary, --hearth-primary-deep, --hearth-primary-tint
+ *   Members/   --hearth-slot-{1..5}-solid, --hearth-slot-{1..5}-tint,
+ *   owners     --hearth-slot-{1..5}-fg
+ *              Five identical slots, per the ticket's own framing: Nestova's
+ *              sage/clay/ochre/blue/plum and Nestorage's indigo/steel/teal/
+ *              peri/shared are different LABELS for the same five slots —
+ *              each app assigns its own members/owners to slots 1-5 in its
+ *              own domain code, not through CSS aliasing.
+ *   Radii      --hearth-radius-card, --hearth-radius-control,
+ *              --hearth-radius-pill
+ *   Shadows    --hearth-shadow-sm, --hearth-shadow-md, --hearth-shadow-lg
+ *   Fonts      --hearth-font-ui, --hearth-font-mono
+ */
+@theme static {
+  --font-sans: var(--hearth-font-ui);
+  --font-mono: var(--hearth-font-mono);
+
+  --color-canvas: var(--hearth-canvas);
+  --color-surface: var(--hearth-surface);
+  --color-surface-raised: var(--hearth-surface-raised);
+  --color-sidebar: var(--hearth-sidebar);
+  --color-sidebar-accent: var(--hearth-sidebar-accent);
+
+  --color-border: var(--hearth-border);
+  --color-border-strong: var(--hearth-border-strong);
+  --color-divider: var(--hearth-divider);
+  --color-divider-subtle: var(--hearth-divider-subtle);
+
+  --color-text: var(--hearth-text);
+  --color-text-secondary: var(--hearth-text-secondary);
+  --color-text-muted: var(--hearth-text-muted);
+  --color-text-faint: var(--hearth-text-faint);
+
+  --color-primary: var(--hearth-primary);
+  --color-primary-deep: var(--hearth-primary-deep);
+  --color-primary-tint: var(--hearth-primary-tint);
+
+  --color-slot-1-solid: var(--hearth-slot-1-solid);
+  --color-slot-1-tint: var(--hearth-slot-1-tint);
+  --color-slot-1-fg: var(--hearth-slot-1-fg);
+  --color-slot-2-solid: var(--hearth-slot-2-solid);
+  --color-slot-2-tint: var(--hearth-slot-2-tint);
+  --color-slot-2-fg: var(--hearth-slot-2-fg);
+  --color-slot-3-solid: var(--hearth-slot-3-solid);
+  --color-slot-3-tint: var(--hearth-slot-3-tint);
+  --color-slot-3-fg: var(--hearth-slot-3-fg);
+  --color-slot-4-solid: var(--hearth-slot-4-solid);
+  --color-slot-4-tint: var(--hearth-slot-4-tint);
+  --color-slot-4-fg: var(--hearth-slot-4-fg);
+  --color-slot-5-solid: var(--hearth-slot-5-solid);
+  --color-slot-5-tint: var(--hearth-slot-5-tint);
+  --color-slot-5-fg: var(--hearth-slot-5-fg);
+
+  --radius-card: var(--hearth-radius-card);
+  --radius-control: var(--hearth-radius-control);
+  --radius-pill: var(--hearth-radius-pill);
+
+  --shadow-sm: var(--hearth-shadow-sm);
+  --shadow-md: var(--hearth-shadow-md);
+  --shadow-lg: var(--hearth-shadow-lg);
+}
+
+/* The sidebar's fixed width is shell geometry, not palette — identical in
+ * both apps today, so it is a literal rather than a name deferred to a
+ * per-app values file. ui/components's Layout reads it via Tailwind's
+ * arbitrary-value syntax (w-[var(--hearth-sidebar-width)]) rather than
+ * hardcoding 264px a second time. */
+:root {
+  --hearth-sidebar-width: 264px;
+}

@@ -20,10 +20,17 @@ pre-commit:
   piped: true
   jobs:
     - name: fmt
-      glob: "*.go"
+      glob: "*.{go,templ}"
       run: make fmt
       # Re-stage files that were already staged and got reformatted.
       stage_fixed: true
+    - name: templ-generate
+      glob: "*.templ"
+      # Fail if committed *_templ.go is stale relative to its .templ source.
+      # Note: this is a git pathspec, not a shell glob — '*' crosses directory
+      # boundaries, so '*_templ.go' matches generated files at any depth
+      # (e.g. ui/components/layout_templ.go).
+      run: make generate && git diff --exit-code -- '*_templ.go'
     - name: lint
       glob: "*.go"
       run: make lint

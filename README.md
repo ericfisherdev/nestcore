@@ -7,10 +7,15 @@ code lives here** — anything that references a consumer's domain model
 (household, item, bin, etc.) belongs in that app's own repo, not nestcore.
 
 The package layout is flat and non-internal (`config/`, `db/`,
-`httpserver/`, `render/`, `qrcode/`, ...) rather than nested under
+`httpserver/`, `render/`, `qrcode/`, `ui/`, ...) rather than nested under
 `internal/`. Go forbids importing another module's `internal/` packages, so
 anything nestcore needs to expose to Nestova or Nestorage has to live outside
 `internal/` from the start.
+
+`ui/` is the one exception to "no domain code": it ships the Hearth shell's
+shared *structure* (templ layout/nav components, self-hosted fonts and JS,
+and a token-NAME contract for Tailwind), but never a palette — token VALUES
+stay in each app's own stylesheet. See `ui`'s package doc for the contract.
 
 ## Development
 
@@ -20,7 +25,7 @@ anything nestcore needs to expose to Nestova or Nestorage has to live outside
 - [golangci-lint](https://golangci-lint.run) **v2.11.4** (see
   [Linting](#linting-golangci-lint))
 
-Everything else (lefthook, conform) is pinned in `go.mod` via Go tool
+Everything else (lefthook, conform, templ) is pinned in `go.mod` via Go tool
 directives, so no global install is needed — invoke it with `go tool <name>`.
 golangci-lint is the exception: its maintainers advise against `go install`,
 so it is installed as a pinned binary instead.
@@ -29,10 +34,11 @@ so it is installed as a pinned binary instead.
 
 ```sh
 make build      # type-check the module (a library emits no binary artifact)
+make generate   # generate Go code from .templ files (ui/components)
 make test       # run tests with the race detector + coverage profile
 make cover      # print a per-function coverage summary
 make lint       # run static analysis (golangci-lint)
-make fmt        # format Go sources (gofumpt + goimports via golangci-lint)
+make fmt        # format templ and Go sources (gofumpt + goimports via golangci-lint)
 make hooks      # install the Lefthook Git hooks
 make tidy       # prune and verify module dependencies
 make help       # list all targets
