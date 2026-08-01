@@ -55,6 +55,23 @@ func TestLayout_AppNeutralHead(t *testing.T) {
 	}
 }
 
+func TestLayout_AccessibilityAffordances(t *testing.T) {
+	html := render(t, components.Layout(components.ShellProps{AppName: "Nestova"}, nil, textComponent("x")))
+
+	for _, want := range []string{
+		`href="#main-content"`,
+		`id="main-content"`,
+		`:inert="open"`,
+		`aria-controls="sidebar"`,
+		`id="sidebar"`,
+		`aria-label="Primary"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("rendered layout missing accessibility affordance %q\n---\n%s", want, html)
+		}
+	}
+}
+
 func TestLayout_OmitsAbsentOptionalProps(t *testing.T) {
 	html := render(t, components.Layout(components.ShellProps{AppName: "Nestova"}, nil, textComponent("x")))
 
@@ -151,6 +168,9 @@ func assertNoExternalHosts(t *testing.T, html string, caseIndex int) {
 			}
 			if u.Host != "" {
 				t.Errorf("case %d: %s=%q names an external host %q", caseIndex, attr, value, u.Host)
+			}
+			if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+				t.Errorf("case %d: %s=%q uses disallowed scheme %q", caseIndex, attr, value, u.Scheme)
 			}
 		}
 	}

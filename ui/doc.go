@@ -20,7 +20,7 @@
 //	}
 //
 // ui/css/theme.css is the Tailwind v4 "@theme" snippet that maps Tailwind
-// utilities (bg-surface, text-ink, ...) onto var(--hearth-*) reads. An app's
+// utilities (bg-surface, text-text, ...) onto var(--hearth-*) reads. An app's
 // Tailwind entry point imports theme.css ahead of its own values file:
 //
 //	@import "tailwindcss" source(none);
