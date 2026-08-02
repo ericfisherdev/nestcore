@@ -24,6 +24,7 @@
 // Tailwind entry point imports theme.css ahead of its own values file:
 //
 //	@import "tailwindcss" source(none);
+//	@import "<path-to-nestcore>/ui/css/base.css";
 //	@import "<path-to-nestcore>/ui/css/theme.css";
 //	@import "./palette.css"; /* this app's own --hearth-* values */
 //
