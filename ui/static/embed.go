@@ -10,6 +10,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
 //go:embed fonts js
@@ -29,6 +30,21 @@ func FS() fs.FS {
 // Handler serves the embedded assets. Mount it at [MountPath]:
 //
 //	mux.Handle(static.MountPath, http.StripPrefix(static.MountPath, static.Handler()))
+//
+// Responses carry a long-lived immutable Cache-Control header — the assets
+// are baked into the binary at build time and never change under a running
+// process — and directory requests 404 rather than listing the embedded
+// fonts/js trees.
 func Handler() http.Handler {
-	return http.FileServerFS(assetsFS)
+	files := http.FileServerFS(assetsFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// StripPrefix leaves "" for MountPath itself and a trailing slash
+		// for subdirectories; neither should render a directory index.
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		files.ServeHTTP(w, r)
+	})
 }
