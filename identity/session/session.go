@@ -1,0 +1,86 @@
+// Package session builds the scs.SessionManager shared by Nestova and
+// Nestorage over identity.sessions (identity/migrate's 00004 migration).
+// This is the SSO seam epic NSTR-112 depends on: a session written
+// through the manager one app builds here is readable through the
+// manager the other app builds here, because both point pgxstore at the
+// SAME schema-qualified table rather than each keeping their own.
+//
+// # Cookie-name contract
+//
+// NewManager does not set Cookie.Name, leaving scs's own default,
+// "session" (see the alexedwards/scs/v2 SessionCookie.Name doc). Both
+// apps sharing one session MUST NOT override it independently: a
+// session cookie is scoped by (host, name, path), and Tailscale's
+// `tailscale serve` publishes both apps on the SAME tailnet node
+// hostname (see this repo's root CLAUDE.md, "Deployment shape" —
+// cookies are host-scoped and ignore port), so a mismatched cookie name
+// between the two apps would make the SAME browser carry two different
+// session cookies instead of one shared one, silently breaking SSO
+// rather than failing loudly. Any future need to rename it must be
+// coordinated as a change to THIS package, not to either app
+// independently.
+//
+// # Cookie domain / hostname strategy
+//
+// Left unset here deliberately: Cookie.Domain defaults to the domain
+// the cookie was issued from, which is correct for the single-node
+// deployment above. Whether a future multi-node deployment needs an
+// explicit Cookie.Domain is an open product decision recorded on epic
+// NSTR-112, not resolved by this package.
+package session
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/alexedwards/scs/pgxstore"
+	"github.com/alexedwards/scs/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ericfisherdev/nestcore/config"
+)
+
+// sessionsTable schema-qualifies the pgxstore table, matching
+// identity/adapter's own convention of never relying on search_path
+// resolution (see identity/adapter's package doc) — pgxstore
+// interpolates Config.TableName directly into its SQL, so a
+// schema-qualified value works exactly like any other table reference
+// in this package.
+const sessionsTable = "identity.sessions"
+
+// disableCleanup turns off pgxstore's background expired-session sweep
+// goroutine: two apps, each constructing their own SessionManager over
+// the SAME identity.sessions table, would otherwise run two independent
+// sweeps against it — harmless but redundant. Deleting expired rows is
+// left to whichever operational job the deployment already runs on a
+// schedule (see this repo's root CLAUDE.md "Deployment shape" — backups
+// run as a systemd timer outside the app process; a sweep can follow
+// the same pattern), rather than each app instance racing its own
+// timer.
+const disableCleanup = 0 * time.Second
+
+// NewManager constructs an scs.SessionManager backed by Postgres over
+// identity.sessions, using the pgxpool the caller already owns. Cookie
+// settings are derived from cfg: Secure follows the resolved
+// SESSION_COOKIE_SECURE policy (auto → prod-only, or forced true/false),
+// Lifetime from SESSION_LIFETIME — see config.SessionConfig's own doc.
+//
+// IdleTimeout is set to half of Lifetime: active users are kept signed
+// in (each request refreshes idle time) while abandoned sessions are
+// reclaimed well before the hard Lifetime cap, mirroring Nestova's own
+// prior session manager before this ticket lifted it into nestcore.
+func NewManager(pool *pgxpool.Pool, cfg config.SessionConfig) *scs.SessionManager {
+	sm := scs.New()
+	sm.Store = pgxstore.NewWithConfig(pool, pgxstore.Config{
+		TableName:       sessionsTable,
+		CleanUpInterval: disableCleanup,
+	})
+	sm.Lifetime = cfg.Lifetime
+	sm.IdleTimeout = cfg.Lifetime / 2
+	sm.Cookie.HttpOnly = true
+	sm.Cookie.SameSite = http.SameSiteLaxMode
+	sm.Cookie.Secure = cfg.Secure
+	sm.Cookie.Path = "/"
+	sm.Cookie.Persist = true
+	return sm
+}

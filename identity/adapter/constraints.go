@@ -26,6 +26,17 @@ const (
 	// member.household_id -> household.id (identity/migrate's baseline
 	// migration leaves it unnamed).
 	memberHouseholdFK = "member_household_id_fkey"
+	// mfaMemberFK is the composite tenant FK on member_mfa (identity/
+	// migrate's 00002 migration); a violation means memberID does not
+	// belong to householdID.
+	mfaMemberFK = "member_mfa_member_fk"
+	// webauthnCredentialHouseholdFK is the auto-named FK
+	// member_credential.household_id -> household(id) (00003 migration).
+	webauthnCredentialHouseholdFK = "member_credential_household_id_fkey"
+	// webauthnCredentialMemberFK is the composite tenant FK on
+	// member_credential (00003 migration); a violation means memberID
+	// does not belong to householdID, mirroring mfaMemberFK.
+	webauthnCredentialMemberFK = "member_credential_member_fk"
 )
 
 // isConstraintViolation reports whether err is a *pgconn.PgError with the
