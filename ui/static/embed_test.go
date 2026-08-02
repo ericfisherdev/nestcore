@@ -55,3 +55,41 @@ func TestHandler_MissingAssetIs404(t *testing.T) {
 		t.Fatalf("GET %s: status %d, want 404", req.URL.Path, rec.Code)
 	}
 }
+
+// TestHandler_SetsImmutableCacheControl guards against the shell's ~145 KB
+// of fonts/JS shipping with no freshness or revalidation signal at all —
+// embed.FS's zero ModTime means net/http never emits a Last-Modified either,
+// so without an explicit Cache-Control every asset is fetched fresh on every
+// page load.
+func TestHandler_SetsImmutableCacheControl(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle(static.MountPath, http.StripPrefix(static.MountPath, static.Handler()))
+
+	req := httptest.NewRequest(http.MethodGet, static.MountPath+"js/htmx.min.js", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	want := "public, max-age=31536000, immutable"
+	if got := rec.Header().Get("Cache-Control"); got != want {
+		t.Errorf("Cache-Control = %q, want %q", got, want)
+	}
+}
+
+// TestHandler_DirectoryRequestsAreNotFound guards against http.FileServerFS's
+// default directory-listing behavior exposing the embedded fonts/js tree
+// layout. The two paths differ after StripPrefix: MountPath itself arrives
+// as an empty path, a subdirectory keeps its trailing slash.
+func TestHandler_DirectoryRequestsAreNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle(static.MountPath, http.StripPrefix(static.MountPath, static.Handler()))
+
+	for _, path := range []string{static.MountPath, static.MountPath + "js/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: status %d, want 404 (directory listing should not be served)", path, rec.Code)
+		}
+	}
+}
