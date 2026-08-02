@@ -101,9 +101,9 @@ func Layout(props ShellProps, nav []NavItem, content templ.Component) templ.Comp
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var3 templ.SafeURL
-			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL(props.FaviconHref))
+			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinURLErrs(props.FaviconHref)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `ui/components/layout.templ`, Line: 60, Col: 60}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `ui/components/layout.templ`, Line: 60, Col: 45}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
@@ -139,9 +139,9 @@ func Layout(props ShellProps, nav []NavItem, content templ.Component) templ.Comp
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 templ.SafeURL
-			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL(props.StylesheetHref))
+			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinURLErrs(props.StylesheetHref)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `ui/components/layout.templ`, Line: 66, Col: 69}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `ui/components/layout.templ`, Line: 66, Col: 54}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
