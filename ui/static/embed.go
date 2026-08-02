@@ -44,6 +44,16 @@ func Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// Stat first so Cache-Control is only ever set on a response that
+		// will actually succeed — setting it unconditionally would have a
+		// 404 for a missing asset cached immutable for a year too, so a
+		// client that requested it before the asset existed would never
+		// see it added in a later release.
+		info, err := fs.Stat(assetsFS, strings.TrimPrefix(r.URL.Path, "/"))
+		if err != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		files.ServeHTTP(w, r)
 	})
