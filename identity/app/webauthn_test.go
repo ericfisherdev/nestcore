@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,9 +40,13 @@ func newFakeWebAuthnCredentialRepo() *fakeWebAuthnCredentialRepo {
 	return &fakeWebAuthnCredentialRepo{byMember: make(map[domain.MemberID][]domain.WebAuthnCredential)}
 }
 
-func (f *fakeWebAuthnCredentialRepo) ListByMember(_ context.Context, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
-	out := make([]domain.WebAuthnCredential, len(f.byMember[memberID]))
-	copy(out, f.byMember[memberID])
+func (f *fakeWebAuthnCredentialRepo) ListByMember(_ context.Context, householdID domain.HouseholdID, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
+	out := make([]domain.WebAuthnCredential, 0, len(f.byMember[memberID]))
+	for _, c := range f.byMember[memberID] {
+		if c.HouseholdID == householdID {
+			out = append(out, c)
+		}
+	}
 	return out, nil
 }
 
@@ -363,8 +368,9 @@ func TestWebAuthnService_BeginRegistration_ReturnsCreationOptionsAndSession(t *t
 	t.Parallel()
 	svc, _, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 
-	creation, session, err := svc.BeginRegistration(context.Background(), memberID, "Alice")
+	creation, session, err := svc.BeginRegistration(context.Background(), householdID, memberID, "Alice")
 	if err != nil {
 		t.Fatalf("BeginRegistration: %v", err)
 	}
@@ -394,12 +400,13 @@ func TestWebAuthnService_BeginRegistration_SameMemberAlwaysGetsSameHandle(t *tes
 	t.Parallel()
 	svc, _, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 
-	_, session1, err := svc.BeginRegistration(context.Background(), memberID, "Alice")
+	_, session1, err := svc.BeginRegistration(context.Background(), householdID, memberID, "Alice")
 	if err != nil {
 		t.Fatalf("BeginRegistration (1): %v", err)
 	}
-	_, session2, err := svc.BeginRegistration(context.Background(), memberID, "Alice")
+	_, session2, err := svc.BeginRegistration(context.Background(), householdID, memberID, "Alice")
 	if err != nil {
 		t.Fatalf("BeginRegistration (2): %v", err)
 	}
@@ -415,15 +422,16 @@ func TestWebAuthnService_BeginRegistration_ExcludesExistingCredentials(t *testin
 	t.Parallel()
 	svc, repo, _ := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	existingCredID := []byte("existing-credential-id-bytes")
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), &domain.WebAuthnCredential{
+	if err := repo.Create(context.Background(), householdID, &domain.WebAuthnCredential{
 		ID: domain.NewWebAuthnCredentialID(), MemberID: memberID,
 		CredentialID: existingCredID, PublicKey: []byte("pk"), Nickname: "Old device",
 	}); err != nil {
 		t.Fatalf("seed existing credential: %v", err)
 	}
 
-	creation, _, err := svc.BeginRegistration(context.Background(), memberID, "Alice")
+	creation, _, err := svc.BeginRegistration(context.Background(), householdID, memberID, "Alice")
 	if err != nil {
 		t.Fatalf("BeginRegistration: %v", err)
 	}
@@ -459,7 +467,7 @@ func TestWebAuthnService_FinishRegistration_ValidResponse_PersistsCredential(t *
 		t.Fatalf("FinishRegistration: %v", err)
 	}
 
-	creds, err := repo.ListByMember(context.Background(), memberID)
+	creds, err := repo.ListByMember(context.Background(), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -495,6 +503,7 @@ func TestWebAuthnService_FinishRegistration_BlankNickname_Defaults(t *testing.T)
 	t.Parallel()
 	svc, repo, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 
 	body, challenge, _ := webauthnSpecTestVectorNoneES256(t)
 	session := validSessionFor(challenge, handles.Derive(memberID))
@@ -503,10 +512,10 @@ func TestWebAuthnService_FinishRegistration_BlankNickname_Defaults(t *testing.T)
 		t.Fatalf("ParseCredentialCreationResponseBody: %v", err)
 	}
 
-	if err := svc.FinishRegistration(context.Background(), memberID, domain.NewHouseholdID(), "Alice", "   ", session, parsed); err != nil {
+	if err := svc.FinishRegistration(context.Background(), memberID, householdID, "Alice", "   ", session, parsed); err != nil {
 		t.Fatalf("FinishRegistration: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 {
 		t.Fatalf("stored %d credentials, want 1", len(creds))
 	}
@@ -527,11 +536,12 @@ func TestWebAuthnService_FinishRegistration_WrongChallenge_Fails(t *testing.T) {
 		t.Fatalf("ParseCredentialCreationResponseBody: %v", err)
 	}
 
-	err = svc.FinishRegistration(context.Background(), memberID, domain.NewHouseholdID(), "Alice", "x", session, parsed)
+	householdID := domain.NewHouseholdID()
+	err = svc.FinishRegistration(context.Background(), memberID, householdID, "Alice", "x", session, parsed)
 	if !errors.Is(err, domain.ErrWebAuthnVerificationFailed) {
 		t.Errorf("FinishRegistration(wrong challenge): err = %v, want ErrWebAuthnVerificationFailed", err)
 	}
-	if creds, _ := repo.ListByMember(context.Background(), memberID); len(creds) != 0 {
+	if creds, _ := repo.ListByMember(context.Background(), householdID, memberID); len(creds) != 0 {
 		t.Error("a failed verification must not persist a credential")
 	}
 }
@@ -552,11 +562,12 @@ func TestWebAuthnService_FinishRegistration_MismatchedUserHandle_Fails(t *testin
 		t.Fatalf("ParseCredentialCreationResponseBody: %v", err)
 	}
 
-	err = svc.FinishRegistration(context.Background(), memberID, domain.NewHouseholdID(), "Alice", "x", session, parsed)
+	householdID := domain.NewHouseholdID()
+	err = svc.FinishRegistration(context.Background(), memberID, householdID, "Alice", "x", session, parsed)
 	if !errors.Is(err, domain.ErrWebAuthnVerificationFailed) {
 		t.Errorf("FinishRegistration(mismatched user handle): err = %v, want ErrWebAuthnVerificationFailed", err)
 	}
-	if creds, _ := repo.ListByMember(context.Background(), memberID); len(creds) != 0 {
+	if creds, _ := repo.ListByMember(context.Background(), householdID, memberID); len(creds) != 0 {
 		t.Error("a failed verification must not persist a credential")
 	}
 }
@@ -591,12 +602,13 @@ func TestWebAuthnService_FinishLogin_ValidResponse_ResolvesMemberAndUpdatesSignC
 	t.Parallel()
 	svc, repo, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	handle := handles.Derive(memberID)
 	credentialID := []byte("synthetic-cred-valid-login")
 	auth := newSyntheticAuthenticator(t, credentialID)
 
 	seed := testWebAuthnCredentialForLogin(memberID, credentialID, handle, auth.cosePublicKey(), 0)
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), seed); err != nil {
+	if err := repo.Create(context.Background(), householdID, seed); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
 
@@ -616,7 +628,7 @@ func TestWebAuthnService_FinishLogin_ValidResponse_ResolvesMemberAndUpdatesSignC
 		t.Errorf("FinishLogin resolved member = %v, want %v", gotMemberID, memberID)
 	}
 
-	creds, err := repo.ListByMember(context.Background(), memberID)
+	creds, err := repo.ListByMember(context.Background(), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -654,12 +666,13 @@ func TestWebAuthnService_FinishLogin_WrongChallenge_Fails(t *testing.T) {
 	t.Parallel()
 	svc, repo, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	handle := handles.Derive(memberID)
 	credentialID := []byte("synthetic-cred-wrong-challenge")
 	auth := newSyntheticAuthenticator(t, credentialID)
 
 	seed := testWebAuthnCredentialForLogin(memberID, credentialID, handle, auth.cosePublicKey(), 0)
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), seed); err != nil {
+	if err := repo.Create(context.Background(), householdID, seed); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
 
@@ -677,7 +690,7 @@ func TestWebAuthnService_FinishLogin_WrongChallenge_Fails(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnVerificationFailed) {
 		t.Errorf("FinishLogin(wrong challenge): err = %v, want ErrWebAuthnVerificationFailed", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].LastUsedAt != nil {
 		t.Error("a failed verification must not update the credential's LastUsedAt/sign count")
 	}
@@ -693,12 +706,13 @@ func TestWebAuthnService_FinishLogin_SignCountIncreases(t *testing.T) {
 	t.Parallel()
 	svc, repo, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	handle := handles.Derive(memberID)
 	credentialID := []byte("synthetic-cred-increases")
 	auth := newSyntheticAuthenticator(t, credentialID)
 
 	seed := testWebAuthnCredentialForLogin(memberID, credentialID, handle, auth.cosePublicKey(), 5)
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), seed); err != nil {
+	if err := repo.Create(context.Background(), householdID, seed); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
 
@@ -713,7 +727,7 @@ func TestWebAuthnService_FinishLogin_SignCountIncreases(t *testing.T) {
 	if _, err := svc.FinishLogin(context.Background(), session, parsed); err != nil {
 		t.Fatalf("FinishLogin: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].SignCount != 6 {
 		t.Errorf("stored sign count = %+v, want 6", creds)
 	}
@@ -753,7 +767,7 @@ func TestWebAuthnService_FinishLogin_SignCountDecreases_StillAllowsLogin(t *test
 	// Stored sign count still advances to the NEW (lower) value, per
 	// applyAssertionResult's own doc — a flagged decrease is still
 	// recorded so the NEXT assertion compares against up-to-date state.
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].SignCount != 3 {
 		t.Errorf("stored sign count after a flagged decrease = %+v, want 3", creds)
 	}
@@ -763,6 +777,7 @@ func TestWebAuthnService_FinishLogin_SignCountZero_NeverFlagsRegardlessOfStored(
 	t.Parallel()
 	svc, repo, handles := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	handle := handles.Derive(memberID)
 	credentialID := []byte("synthetic-cred-permanent-zero")
 	auth := newSyntheticAuthenticator(t, credentialID)
@@ -771,7 +786,7 @@ func TestWebAuthnService_FinishLogin_SignCountZero_NeverFlagsRegardlessOfStored(
 	// own doc explains why THIS rule never flags newCount == 0, unlike
 	// go-webauthn's own default CloneWarning semantics.
 	seed := testWebAuthnCredentialForLogin(memberID, credentialID, handle, auth.cosePublicKey(), 42)
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), seed); err != nil {
+	if err := repo.Create(context.Background(), householdID, seed); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
 
@@ -786,7 +801,7 @@ func TestWebAuthnService_FinishLogin_SignCountZero_NeverFlagsRegardlessOfStored(
 	if _, err := svc.FinishLogin(context.Background(), session, parsed); err != nil {
 		t.Fatalf("FinishLogin: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].SignCount != 0 {
 		t.Errorf("stored sign count = %+v, want 0", creds)
 	}
@@ -814,7 +829,7 @@ func testWebAuthnCredentialForLogin(memberID domain.MemberID, credentialID, user
 func TestWebAuthnService_ListDevices_EmptyForNewMember(t *testing.T) {
 	t.Parallel()
 	svc, _, _ := newWebAuthnServiceFixture(t)
-	creds, err := svc.ListDevices(context.Background(), domain.NewMemberID())
+	creds, err := svc.ListDevices(context.Background(), domain.NewHouseholdID(), domain.NewMemberID())
 	if err != nil {
 		t.Fatalf("ListDevices: %v", err)
 	}
@@ -838,7 +853,7 @@ func TestWebAuthnService_Rename_UpdatesNickname(t *testing.T) {
 	if err := svc.Rename(context.Background(), householdID, memberID, id, "New Name"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].Nickname != "New Name" {
 		t.Errorf("Nickname after rename = %+v, want New Name", creds)
 	}
@@ -859,7 +874,7 @@ func TestWebAuthnService_Rename_BlankNickname_Defaults(t *testing.T) {
 	if err := svc.Rename(context.Background(), householdID, memberID, id, "  "); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 1 || creds[0].Nickname != "Passkey" {
 		t.Errorf("Nickname after blank rename = %+v, want the default %q", creds, "Passkey")
 	}
@@ -871,6 +886,65 @@ func TestWebAuthnService_Rename_NotFound(t *testing.T) {
 	err := svc.Rename(context.Background(), domain.NewHouseholdID(), domain.NewMemberID(), domain.NewWebAuthnCredentialID(), "x")
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Rename(unknown id): err = %v, want ErrWebAuthnCredentialNotFound", err)
+	}
+}
+
+// TestWebAuthnService_Rename_WrongHousehold_Fails mirrors
+// TestWebAuthnService_Revoke_WrongHousehold_Fails's own rationale: the
+// fake enforces householdID in Rename too, and without a test exercising
+// it, a regression that dropped householdID from
+// WebAuthnService.Rename's call to the repository would pass every
+// other test in this file.
+func TestWebAuthnService_Rename_WrongHousehold_Fails(t *testing.T) {
+	t.Parallel()
+	svc, repo, _ := newWebAuthnServiceFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	id := domain.NewWebAuthnCredentialID()
+	if err := repo.Create(context.Background(), householdID, &domain.WebAuthnCredential{
+		ID: id, MemberID: memberID, CredentialID: []byte("cred"), PublicKey: []byte("pk"), Nickname: "Device",
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	err := svc.Rename(context.Background(), domain.NewHouseholdID(), memberID, id, "Renamed")
+	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
+		t.Errorf("Rename(other household): err = %v, want ErrWebAuthnCredentialNotFound", err)
+	}
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
+	if len(creds) != 1 || creds[0].Nickname != "Device" {
+		t.Error("a cross-tenant rename must not change the nickname")
+	}
+}
+
+// TestWebAuthnService_Rename_LongNickname_TruncatedToRunes proves
+// normalizeNickname's third branch: a regression that removed
+// maxCredentialNicknameLen would pass every other Rename test in this
+// file, since none of them submit a nickname anywhere near the bound. A
+// multi-byte rune is used deliberately so the assertion also proves the
+// bound counts runes, not bytes.
+func TestWebAuthnService_Rename_LongNickname_TruncatedToRunes(t *testing.T) {
+	t.Parallel()
+	svc, repo, _ := newWebAuthnServiceFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	id := domain.NewWebAuthnCredentialID()
+	if err := repo.Create(context.Background(), householdID, &domain.WebAuthnCredential{
+		ID: id, MemberID: memberID, CredentialID: []byte("cred"), PublicKey: []byte("pk"), Nickname: "Old",
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	long := strings.Repeat("é", 100)
+	if err := svc.Rename(context.Background(), householdID, memberID, id, long); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
+	if len(creds) != 1 {
+		t.Fatalf("stored %d credentials, want 1", len(creds))
+	}
+	if got := []rune(creds[0].Nickname); len(got) != 64 {
+		t.Errorf("nickname length = %d runes, want 64", len(got))
 	}
 }
 
@@ -889,7 +963,7 @@ func TestWebAuthnService_Revoke_RemovesCredential(t *testing.T) {
 	if err := svc.Revoke(context.Background(), householdID, memberID, id); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	creds, _ := repo.ListByMember(context.Background(), memberID)
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
 	if len(creds) != 0 {
 		t.Errorf("credentials after revoke = %d, want 0 (revocation must be immediate)", len(creds))
 	}
@@ -913,8 +987,9 @@ func TestWebAuthnService_Revoke_WrongHousehold_Fails(t *testing.T) {
 	t.Parallel()
 	svc, repo, _ := newWebAuthnServiceFixture(t)
 	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
 	id := domain.NewWebAuthnCredentialID()
-	if err := repo.Create(context.Background(), domain.NewHouseholdID(), &domain.WebAuthnCredential{
+	if err := repo.Create(context.Background(), householdID, &domain.WebAuthnCredential{
 		ID: id, MemberID: memberID, CredentialID: []byte("cred"), PublicKey: []byte("pk"), Nickname: "Device",
 	}); err != nil {
 		t.Fatalf("seed credential: %v", err)
@@ -924,7 +999,7 @@ func TestWebAuthnService_Revoke_WrongHousehold_Fails(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Revoke(other household): err = %v, want ErrWebAuthnCredentialNotFound", err)
 	}
-	if creds, _ := repo.ListByMember(context.Background(), memberID); len(creds) != 1 {
+	if creds, _ := repo.ListByMember(context.Background(), householdID, memberID); len(creds) != 1 {
 		t.Error("a cross-tenant revoke must not remove the credential")
 	}
 }

@@ -23,10 +23,17 @@ type MFARepository struct {
 var _ domain.MFARepository = (*MFARepository)(nil)
 
 // NewMFARepository constructs the repository with an injected query
-// executor (a db.TX, satisfied by both *pgxpool.Pool and pgx.Tx).
+// executor (a db.TX, satisfied by both *pgxpool.Pool and pgx.Tx). Panics
+// if dbtx cannot also begin a transaction (mfaTxBeginner) — both
+// beginEnrollmentOnce and ConfirmEnrollmentWithCodes need one, and
+// failing here at construction is far more convenient than the first
+// time a member enrolls or confirms.
 func NewMFARepository(dbtx db.TX) *MFARepository {
 	if dbtx == nil {
 		panic("adapter: NewMFARepository requires a non-nil db.TX")
+	}
+	if _, ok := dbtx.(mfaTxBeginner); !ok {
+		panic("adapter: NewMFARepository requires a db.TX that can also begin transactions (mfaTxBeginner)")
 	}
 	return &MFARepository{dbtx: dbtx}
 }
@@ -185,7 +192,7 @@ func (r *MFARepository) beginEnrollmentOnce(ctx context.Context, memberID domain
 // operation: it is what makes two concurrent callers racing to confirm
 // the SAME still-unconfirmed enrollment resolve to exactly one winner,
 // with the loser's hashes never persisted at all.
-func (r *MFARepository) ConfirmEnrollmentWithCodes(ctx context.Context, memberID domain.MemberID, recoveryCodeHashes []string) error {
+func (r *MFARepository) ConfirmEnrollmentWithCodes(ctx context.Context, householdID domain.HouseholdID, memberID domain.MemberID, recoveryCodeHashes []string) error {
 	beginner, ok := r.dbtx.(mfaTxBeginner)
 	if !ok {
 		return errors.New("confirm mfa enrollment: executor does not support transactions")
@@ -196,13 +203,23 @@ func (r *MFARepository) ConfirmEnrollmentWithCodes(ctx context.Context, memberID
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var confirmedAt *time.Time
-	lookupErr := tx.QueryRow(ctx, `SELECT confirmed_at FROM identity.member_mfa WHERE member_id = $1 FOR UPDATE`, memberID.String()).Scan(&confirmedAt)
+	var (
+		existingHouseholdID string
+		confirmedAt         *time.Time
+	)
+	lookupErr := tx.QueryRow(ctx, `SELECT household_id, confirmed_at FROM identity.member_mfa WHERE member_id = $1 FOR UPDATE`, memberID.String()).
+		Scan(&existingHouseholdID, &confirmedAt)
 	switch {
 	case errors.Is(lookupErr, pgx.ErrNoRows):
 		return domain.ErrMFANotEnrolled
 	case lookupErr != nil:
 		return fmt.Errorf("confirm mfa enrollment: lookup: %w", lookupErr)
+	case existingHouseholdID != householdID.String():
+		// The row exists but under a DIFFERENT household than the
+		// caller supplied — never confirm it. Reported the same as "no
+		// such row" so no household-boundary information leaks,
+		// mirroring BeginEnrollment's own tenant guard.
+		return domain.ErrMFANotEnrolled
 	case confirmedAt != nil:
 		// Already confirmed — including by a concurrent racing confirm
 		// that committed first while this call waited on the row lock.

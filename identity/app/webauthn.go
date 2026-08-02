@@ -79,10 +79,10 @@ func NewWebAuthnService(repo domain.WebAuthnCredentialRepository, wa *webauthn.W
 	return &WebAuthnService{repo: repo, wa: wa, handles: handles, logger: logger}, nil
 }
 
-// ListDevices returns memberID's registered credentials, oldest first,
-// for a settings page's "Your devices" list.
-func (s *WebAuthnService) ListDevices(ctx context.Context, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
-	creds, err := s.repo.ListByMember(ctx, memberID)
+// ListDevices returns memberID's registered credentials within
+// householdID, oldest first, for a settings page's "Your devices" list.
+func (s *WebAuthnService) ListDevices(ctx context.Context, householdID domain.HouseholdID, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
+	creds, err := s.repo.ListByMember(ctx, householdID, memberID)
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: list devices: %w", err)
 	}
@@ -101,8 +101,8 @@ func (s *WebAuthnService) ListDevices(ctx context.Context, memberID domain.Membe
 // registered (WithExclusions), so a browser will not let the SAME
 // physical authenticator be registered a second time as a confusing
 // duplicate.
-func (s *WebAuthnService) BeginRegistration(ctx context.Context, memberID domain.MemberID, displayName string) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
-	existing, err := s.repo.ListByMember(ctx, memberID)
+func (s *WebAuthnService) BeginRegistration(ctx context.Context, householdID domain.HouseholdID, memberID domain.MemberID, displayName string) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+	existing, err := s.repo.ListByMember(ctx, householdID, memberID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("webauthn: begin registration: list existing credentials: %w", err)
 	}
@@ -131,7 +131,7 @@ func (s *WebAuthnService) BeginRegistration(ctx context.Context, memberID domain
 // challenge, RP ID/origin mismatch, signature invalid) — deliberately
 // undifferentiated; see that sentinel's own doc.
 func (s *WebAuthnService) FinishRegistration(ctx context.Context, memberID domain.MemberID, householdID domain.HouseholdID, displayName, nickname string, session webauthn.SessionData, parsedResponse *protocol.ParsedCredentialCreationData) error {
-	existing, err := s.repo.ListByMember(ctx, memberID)
+	existing, err := s.repo.ListByMember(ctx, householdID, memberID)
 	if err != nil {
 		return fmt.Errorf("webauthn: finish registration: list existing credentials: %w", err)
 	}
@@ -218,10 +218,20 @@ func (s *WebAuthnService) FinishLogin(ctx context.Context, session webauthn.Sess
 	var (
 		resolvedMemberID  domain.MemberID
 		storedCredentials []domain.WebAuthnCredential
+		lookupErr         error
 	)
 	handler := func(_, userHandle []byte) (webauthn.User, error) {
 		memberID, creds, err := s.repo.FindByUserHandle(ctx, userHandle)
 		if err != nil {
+			if !errors.Is(err, domain.ErrMemberNotFound) {
+				// A genuine lookup failure (DB outage, a malformed
+				// stored row), not an unknown handle. Captured here so
+				// the caller below can surface it as a server error
+				// rather than silently folding it into "verification
+				// failed" — the no-oracle rule governs the CLIENT-facing
+				// message, not the internal error value.
+				lookupErr = err
+			}
 			return nil, err
 		}
 		resolvedMemberID = memberID
@@ -230,11 +240,12 @@ func (s *WebAuthnService) FinishLogin(ctx context.Context, session webauthn.Sess
 	}
 
 	if _, _, err := s.wa.ValidatePasskeyLogin(handler, session, parsedResponse); err != nil {
+		if lookupErr != nil {
+			return domain.MemberID{}, fmt.Errorf("webauthn: finish login: resolve user handle: %w", lookupErr)
+		}
 		// See FinishRegistration's identical logging: the returned
 		// sentinel stays undifferentiated, but the underlying cause
-		// (which may be an infrastructure failure from the handler
-		// above, not merely an unknown handle) is still worth a
-		// server-side record.
+		// is still worth a server-side record.
 		s.logger.DebugContext(ctx, "webauthn login verification failed", "error", err)
 		return domain.MemberID{}, fmt.Errorf("%w: %v", domain.ErrWebAuthnVerificationFailed, err)
 	}

@@ -119,11 +119,14 @@ func (s *MFAService) BeginEnrollment(ctx context.Context, memberID domain.Member
 // raw codes — shown to the member exactly once; only their hashes are
 // persisted.
 //
-// Returns domain.ErrMFANotEnrolled when no enrollment exists,
-// domain.ErrMFAAlreadyEnrolled when it is already confirmed (including by
-// a racing concurrent confirm that won), and domain.ErrInvalidTOTPCode
-// when code does not validate.
-func (s *MFAService) ConfirmEnrollment(ctx context.Context, memberID domain.MemberID, code string) ([]string, error) {
+// Returns domain.ErrMFANotEnrolled when no enrollment exists (including
+// when memberID's real enrollment belongs to a DIFFERENT household than
+// householdID — a defense-in-depth tenant check enforced by
+// ConfirmEnrollmentWithCodes, reported identically so neither leaks which
+// case occurred), domain.ErrMFAAlreadyEnrolled when it is already
+// confirmed (including by a racing concurrent confirm that won), and
+// domain.ErrInvalidTOTPCode when code does not validate.
+func (s *MFAService) ConfirmEnrollment(ctx context.Context, memberID domain.MemberID, householdID domain.HouseholdID, code string) ([]string, error) {
 	enrollment, err := s.repo.GetEnrollment(ctx, memberID)
 	if err != nil {
 		return nil, err
@@ -146,7 +149,12 @@ func (s *MFAService) ConfirmEnrollment(ctx context.Context, memberID domain.Memb
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.ConfirmEnrollmentWithCodes(ctx, memberID, hashes); err != nil {
+	// householdID is the CALLER's own (the acting session's household),
+	// not read back from enrollment — passing enrollment.HouseholdID
+	// here would make ConfirmEnrollmentWithCodes' tenant check
+	// tautological (always matching whatever is already on the row it is
+	// about to touch) and provide no actual isolation.
+	if err := s.repo.ConfirmEnrollmentWithCodes(ctx, householdID, memberID, hashes); err != nil {
 		return nil, fmt.Errorf("mfa: confirm enrollment: %w", err)
 	}
 	s.logger.InfoContext(ctx, "mfa enrollment confirmed", "member_id", memberID.String())
@@ -280,11 +288,18 @@ func (s *MFAService) verifyTOTPOrRecovery(ctx context.Context, memberID domain.M
 			return nil
 		}
 		if recoveryCode == "" {
+			s.logger.WarnContext(ctx, "mfa step-up totp verification failed", "member_id", memberID.String())
 			return domain.ErrInvalidTOTPCode
 		}
 	}
 
-	return s.consumeRecoveryCode(ctx, memberID, recoveryCode)
+	if err := s.consumeRecoveryCode(ctx, memberID, recoveryCode); err != nil {
+		if errors.Is(err, domain.ErrRecoveryCodeInvalid) {
+			s.logger.WarnContext(ctx, "mfa step-up recovery code verification failed", "member_id", memberID.String())
+		}
+		return err
+	}
+	return nil
 }
 
 // consumeRecoveryCode matches raw against memberID's unused recovery

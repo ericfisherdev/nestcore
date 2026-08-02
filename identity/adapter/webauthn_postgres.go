@@ -36,20 +36,21 @@ func NewWebAuthnCredentialRepository(dbtx db.TX) *WebAuthnCredentialRepository {
 	return &WebAuthnCredentialRepository{dbtx: dbtx}
 }
 
-// ListByMember returns every credential registered by memberID, oldest
-// first — ties on created_at (two credentials registered within the
-// same clock tick) broken deterministically by id, its own tie-break
-// secondary key. A member with none returns an empty slice, never an
-// error.
-func (r *WebAuthnCredentialRepository) ListByMember(ctx context.Context, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
+// ListByMember returns every credential registered by memberID within
+// householdID, oldest first — ties on created_at (two credentials
+// registered within the same clock tick) broken deterministically by id,
+// its own tie-break secondary key. A member with none, or a memberID
+// belonging to a different household than householdID, returns an empty
+// slice, never an error.
+func (r *WebAuthnCredentialRepository) ListByMember(ctx context.Context, householdID domain.HouseholdID, memberID domain.MemberID) ([]domain.WebAuthnCredential, error) {
 	const q = `
 		SELECT id, household_id, credential_id, public_key, sign_count, transports,
 		       aaguid, nickname, user_handle, created_at, last_used_at
 		  FROM identity.member_credential
-		 WHERE member_id = $1
+		 WHERE member_id = $1 AND household_id = $2
 		 ORDER BY created_at, id`
 
-	rows, err := r.dbtx.Query(ctx, q, memberID.String())
+	rows, err := r.dbtx.Query(ctx, q, memberID.String(), householdID.String())
 	if err != nil {
 		return nil, fmt.Errorf("list webauthn credentials: %w", err)
 	}
@@ -261,11 +262,14 @@ func (r *WebAuthnCredentialRepository) FindByUserHandle(ctx context.Context, han
 // login or step-up, only skip a write that would have regressed stored
 // state backward in time.
 func (r *WebAuthnCredentialRepository) UpdateAfterAssertion(ctx context.Context, credentialID []byte, signCount uint32, usedAt time.Time) error {
-	// The guard's tie-break matters: two assertions can carry the SAME
-	// usedAt (e.g. a clock with coarser-than-actual resolution), and a
-	// plain "<=" would let a lower sign_count win that tie purely by
-	// arrival order, regressing the stored counter. Comparing sign_count
-	// too on an exact tie keeps the guard monotonic in BOTH dimensions.
+	// The guard is monotonic in last_used_at. Two assertions can carry
+	// the SAME usedAt (e.g. a clock with coarser-than-actual
+	// resolution), and a plain "<=" would let a lower sign_count win
+	// that tie purely by arrival order. Comparing sign_count on an exact
+	// tie removes that arrival-order dependence. A strictly newer usedAt
+	// always wins even with a lower sign_count: the counter policy
+	// belongs to WebAuthnService, which has already verified the
+	// assertion before this method is ever called.
 	const q = `
 		UPDATE identity.member_credential
 		   SET sign_count = $2, last_used_at = $3

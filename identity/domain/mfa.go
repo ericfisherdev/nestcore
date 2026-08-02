@@ -98,7 +98,10 @@ func (c RecoveryCode) Used() bool {
 //     enrollment can never both "win": the loser's hashes are never
 //     persisted, and it receives ErrMFAAlreadyEnrolled rather than
 //     silently returning raw codes to its caller that were never
-//     actually stored. Returns ErrMFANotEnrolled when no row exists, and
+//     actually stored. Scoped to householdID as a defense-in-depth tenant
+//     check, mirroring DeleteEnrollment's own: this method must never
+//     confirm a row belonging to a DIFFERENT household. Returns
+//     ErrMFANotEnrolled when no row exists in that household, and
 //     ErrMFAAlreadyEnrolled when the row is already confirmed (including
 //     by a racing, now-committed, concurrent call to this same method).
 //   - DeleteEnrollment removes the member's enrollment (confirmed or
@@ -128,7 +131,7 @@ func (c RecoveryCode) Used() bool {
 type MFARepository interface {
 	GetEnrollment(ctx context.Context, memberID MemberID) (*MFAEnrollment, error)
 	BeginEnrollment(ctx context.Context, memberID MemberID, householdID HouseholdID, secretEnc []byte) error
-	ConfirmEnrollmentWithCodes(ctx context.Context, memberID MemberID, recoveryCodeHashes []string) error
+	ConfirmEnrollmentWithCodes(ctx context.Context, householdID HouseholdID, memberID MemberID, recoveryCodeHashes []string) error
 	DeleteEnrollment(ctx context.Context, householdID HouseholdID, memberID MemberID) error
 	ListUnusedRecoveryCodes(ctx context.Context, memberID MemberID) ([]RecoveryCode, error)
 	MarkRecoveryCodeUsed(ctx context.Context, codeID RecoveryCodeID) error
