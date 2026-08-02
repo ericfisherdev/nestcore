@@ -72,6 +72,19 @@ func TestLayout_AccessibilityAffordances(t *testing.T) {
 	}
 }
 
+// TestLayout_ClosesDrawerOnResizeToDesktop guards against the drawer's
+// open state surviving a narrow-to-desktop breakpoint cross (e.g. tablet
+// rotation), which would otherwise leave <main :inert="open"> permanently
+// inert once the sidebar snaps to its fixed desktop position.
+func TestLayout_ClosesDrawerOnResizeToDesktop(t *testing.T) {
+	html := render(t, components.Layout(components.ShellProps{AppName: "Nestova"}, nil, textComponent("x")))
+
+	want := `@resize.window="if (open && window.innerWidth >= 768) open = false"`
+	if !strings.Contains(html, want) {
+		t.Errorf("rendered layout missing resize handler %q\n---\n%s", want, html)
+	}
+}
+
 func TestLayout_OmitsAbsentOptionalProps(t *testing.T) {
 	html := render(t, components.Layout(components.ShellProps{AppName: "Nestova"}, nil, textComponent("x")))
 
