@@ -90,6 +90,7 @@ templ Layout(props ShellProps, nav []NavItem, content templ.Component) {
 			class="bg-canvas font-sans text-text min-h-screen"
 			x-data="{ open: false }"
 			@keydown.escape.window="if (open) { open = false; $refs.navToggle.focus() }"
+			@resize.window="if (open && window.innerWidth >= 768) open = false"
 		>
 			<a
 				href="#main-content"
