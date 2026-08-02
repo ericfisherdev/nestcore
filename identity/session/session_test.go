@@ -7,6 +7,7 @@ package session_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -118,6 +119,12 @@ func TestNewManager_CookieDefaultsDocumented(t *testing.T) {
 	}
 	if !sm.Cookie.Persist {
 		t.Error("Cookie.Persist = false, want true")
+	}
+	if sm.Cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("Cookie.SameSite = %v, want SameSiteLaxMode", sm.Cookie.SameSite)
+	}
+	if !sm.HashTokenInStore {
+		t.Error("HashTokenInStore = false, want true")
 	}
 	if sm.Cookie.Path != "/" {
 		t.Errorf("Cookie.Path = %q, want %q", sm.Cookie.Path, "/")

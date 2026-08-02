@@ -48,16 +48,13 @@ import (
 // in this package.
 const sessionsTable = "identity.sessions"
 
-// disableCleanup turns off pgxstore's background expired-session sweep
-// goroutine: two apps, each constructing their own SessionManager over
-// the SAME identity.sessions table, would otherwise run two independent
-// sweeps against it — harmless but redundant. Deleting expired rows is
-// left to whichever operational job the deployment already runs on a
-// schedule (see this repo's root CLAUDE.md "Deployment shape" — backups
-// run as a systemd timer outside the app process; a sweep can follow
-// the same pattern), rather than each app instance racing its own
-// timer.
-const disableCleanup = 0 * time.Second
+// cleanupInterval is how often pgxstore's background goroutine sweeps
+// expired rows out of identity.sessions. Both apps construct their own
+// SessionManager over this SAME table, so both run this sweep
+// independently — redundant but harmless (a DELETE ... WHERE expiry <
+// now() is idempotent), and simpler than coordinating a single external
+// job between two independently deployed binaries.
+const cleanupInterval = 5 * time.Minute
 
 // NewManager constructs an scs.SessionManager backed by Postgres over
 // identity.sessions, using the pgxpool the caller already owns. Cookie
@@ -69,14 +66,25 @@ const disableCleanup = 0 * time.Second
 // in (each request refreshes idle time) while abandoned sessions are
 // reclaimed well before the hard Lifetime cap, mirroring Nestova's own
 // prior session manager before this ticket lifted it into nestcore.
+//
+// HashTokenInStore is set so identity.sessions stores a SHA-256 digest
+// of the cookie token rather than the raw token itself — the hash is a
+// plain, unkeyed function of the token alone (verified against the
+// installed scs v2.9.0 source), so it is safe for the SSO seam: both
+// apps hash the SAME token to the SAME digest independently, with no
+// shared secret or per-instance state to keep in sync. Both apps MUST
+// set this identically, or a session written by one is unreadable by
+// the other — the same failure mode the cookie-name contract above
+// warns about.
 func NewManager(pool *pgxpool.Pool, cfg config.SessionConfig) *scs.SessionManager {
 	sm := scs.New()
 	sm.Store = pgxstore.NewWithConfig(pool, pgxstore.Config{
 		TableName:       sessionsTable,
-		CleanUpInterval: disableCleanup,
+		CleanUpInterval: cleanupInterval,
 	})
 	sm.Lifetime = cfg.Lifetime
 	sm.IdleTimeout = cfg.Lifetime / 2
+	sm.HashTokenInStore = true
 	sm.Cookie.HttpOnly = true
 	sm.Cookie.SameSite = http.SameSiteLaxMode
 	sm.Cookie.Secure = cfg.Secure

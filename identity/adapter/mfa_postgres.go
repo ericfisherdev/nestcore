@@ -68,14 +68,18 @@ type mfaTxBeginner interface {
 	Begin(context.Context) (pgx.Tx, error)
 }
 
-// BeginEnrollment upserts an unconfirmed enrollment for memberID, inside
-// a transaction that locks any existing row (SELECT ... FOR UPDATE)
-// before deciding how to proceed — closing the race a plain
-// INSERT ... ON CONFLICT DO UPDATE would leave open between two
-// concurrent BeginEnrollment calls, while still distinguishing WHY a
-// conflicting row blocks the write (see the two error returns below),
-// which a single ON CONFLICT ... WHERE clause cannot do from its
-// zero-rows-returned result alone.
+// errMFAEnrollmentRaced is beginEnrollmentOnce's internal signal that its
+// INSERT lost a race for the row to a concurrent first-time enrollment
+// (see that method's own doc) — BeginEnrollment retries once against it
+// rather than surfacing this to the caller.
+var errMFAEnrollmentRaced = errors.New("adapter: begin mfa enrollment: lost the insert race")
+
+// BeginEnrollment upserts an unconfirmed enrollment for memberID,
+// retrying beginEnrollmentOnce a single time if the first attempt loses
+// a concurrent first-time-enrollment race (see that method's own doc for
+// why SELECT ... FOR UPDATE cannot protect against it) — the retry
+// re-runs against the now-existing row, which the FOR UPDATE lock path
+// resolves normally.
 //
 // Returns domain.ErrMFAAlreadyEnrolled when the existing row is already
 // CONFIRMED, and domain.ErrMemberNotFound both for a genuinely unknown
@@ -85,6 +89,38 @@ type mfaTxBeginner interface {
 // pending secret, and reports both cases identically so neither leaks
 // which one occurred.
 func (r *MFARepository) BeginEnrollment(ctx context.Context, memberID domain.MemberID, householdID domain.HouseholdID, secretEnc []byte) error {
+	err := r.beginEnrollmentOnce(ctx, memberID, householdID, secretEnc)
+	if errors.Is(err, errMFAEnrollmentRaced) {
+		err = r.beginEnrollmentOnce(ctx, memberID, householdID, secretEnc)
+		if errors.Is(err, errMFAEnrollmentRaced) {
+			// Losing the race twice in a row means a THIRD concurrent
+			// caller is also racing this same first-time enrollment —
+			// astronomically unlikely in practice. Surface a plain error
+			// rather than retrying indefinitely or leaking the internal
+			// sentinel.
+			return fmt.Errorf("begin mfa enrollment: %s: repeated insert race", memberID)
+		}
+	}
+	return err
+}
+
+// beginEnrollmentOnce is BeginEnrollment's single-attempt body: it opens
+// a transaction that locks any EXISTING row (SELECT ... FOR UPDATE)
+// before deciding how to proceed — closing the race a plain
+// INSERT ... ON CONFLICT DO UPDATE would leave open between two
+// concurrent BeginEnrollment calls for an ALREADY-enrolled member, while
+// still distinguishing WHY a conflicting row blocks the write (see the
+// two error returns below), which a single ON CONFLICT ... WHERE clause
+// cannot do from its zero-rows-returned result alone.
+//
+// This locking scheme has a gap for a member with NO existing row:
+// Postgres's FOR UPDATE takes no lock when zero rows match, so two
+// concurrent callers racing a member's FIRST-EVER enrollment can both
+// reach the INSERT branch below. The loser fails member_mfa's primary
+// key (mfaMemberPK), not the FK — mapped here to errMFAEnrollmentRaced
+// for BeginEnrollment to retry, rather than a case this method resolves
+// itself.
+func (r *MFARepository) beginEnrollmentOnce(ctx context.Context, memberID domain.MemberID, householdID domain.HouseholdID, secretEnc []byte) error {
 	beginner, ok := r.dbtx.(mfaTxBeginner)
 	if !ok {
 		return errors.New("begin mfa enrollment: executor does not support transactions")
@@ -107,8 +143,11 @@ func (r *MFARepository) BeginEnrollment(ctx context.Context, memberID domain.Mem
 			INSERT INTO identity.member_mfa (member_id, household_id, totp_secret_enc, confirmed_at)
 			VALUES ($1, $2, $3, NULL)`
 		if _, err := tx.Exec(ctx, insert, memberID.String(), householdID.String(), secretEnc); err != nil {
-			if isConstraintViolation(err, foreignKeyViolation, mfaMemberFK) {
+			switch {
+			case isConstraintViolation(err, foreignKeyViolation, mfaMemberFK):
 				return domain.ErrMemberNotFound
+			case isConstraintViolation(err, uniqueViolation, mfaMemberPK):
+				return errMFAEnrollmentRaced
 			}
 			return fmt.Errorf("begin mfa enrollment: insert: %w", err)
 		}
@@ -210,14 +249,17 @@ func (r *MFARepository) DeleteEnrollment(ctx context.Context, householdID domain
 }
 
 // ListUnusedRecoveryCodes returns every not-yet-used recovery code for
-// memberID, oldest first.
+// memberID, oldest first — ties on created_at (every code in one batch
+// shares the same transaction-local now() value) broken deterministically
+// by id, mirroring WebAuthnCredentialRepository.ListByMember's own
+// tiebreaker.
 func (r *MFARepository) ListUnusedRecoveryCodes(ctx context.Context, memberID domain.MemberID) ([]domain.RecoveryCode, error) {
 	const q = `
 		SELECT id, code_hash, created_at
 		  FROM identity.member_recovery_code
 		 WHERE member_id = $1
 		   AND used_at IS NULL
-		 ORDER BY created_at`
+		 ORDER BY created_at, id`
 
 	rows, err := r.dbtx.Query(ctx, q, memberID.String())
 	if err != nil {

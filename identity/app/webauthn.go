@@ -27,6 +27,25 @@ const webauthnRegistrationResidentKey = protocol.ResidentKeyRequirementPreferred
 // nickname.
 const defaultCredentialNickname = "Passkey"
 
+// maxCredentialNicknameLen bounds the member-supplied device nickname
+// (Rename and FinishRegistration): unbounded input would otherwise be
+// stored and later rendered verbatim in a "Your devices" list.
+const maxCredentialNicknameLen = 64
+
+// normalizeNickname trims nickname, defaults it to
+// defaultCredentialNickname when blank, and truncates it to
+// maxCredentialNicknameLen runes.
+func normalizeNickname(nickname string) string {
+	nickname = strings.TrimSpace(nickname)
+	if nickname == "" {
+		return defaultCredentialNickname
+	}
+	if runes := []rune(nickname); len(runes) > maxCredentialNicknameLen {
+		return string(runes[:maxCredentialNicknameLen])
+	}
+	return nickname
+}
+
 // WebAuthnService orchestrates passkey registration, device management,
 // and passkey login ceremonies. Login/step-up freshness policy (e.g.
 // requiring a recent step-up before a security-sensitive action) is an
@@ -120,13 +139,15 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, memberID domai
 
 	cred, err := s.wa.CreateCredential(user, session, parsedResponse)
 	if err != nil {
+		// The returned sentinel is deliberately undifferentiated (see its
+		// own doc), but the underlying cause is still worth a server-side
+		// record: without it, an operator cannot tell an expired
+		// challenge from an RP ID/origin misconfiguration.
+		s.logger.DebugContext(ctx, "webauthn registration verification failed", "member_id", memberID.String(), "error", err)
 		return fmt.Errorf("%w: %v", domain.ErrWebAuthnVerificationFailed, err)
 	}
 
-	nickname = strings.TrimSpace(nickname)
-	if nickname == "" {
-		nickname = defaultCredentialNickname
-	}
+	nickname = normalizeNickname(nickname)
 	stored := &domain.WebAuthnCredential{
 		ID:           domain.NewWebAuthnCredentialID(),
 		MemberID:     memberID,
@@ -148,10 +169,7 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, memberID domai
 
 // Rename updates the nickname on memberID's credential id.
 func (s *WebAuthnService) Rename(ctx context.Context, householdID domain.HouseholdID, memberID domain.MemberID, id domain.WebAuthnCredentialID, nickname string) error {
-	nickname = strings.TrimSpace(nickname)
-	if nickname == "" {
-		nickname = defaultCredentialNickname
-	}
+	nickname = normalizeNickname(nickname)
 	if err := s.repo.Rename(ctx, householdID, memberID, id, nickname); err != nil {
 		return err
 	}
@@ -212,6 +230,12 @@ func (s *WebAuthnService) FinishLogin(ctx context.Context, session webauthn.Sess
 	}
 
 	if _, _, err := s.wa.ValidatePasskeyLogin(handler, session, parsedResponse); err != nil {
+		// See FinishRegistration's identical logging: the returned
+		// sentinel stays undifferentiated, but the underlying cause
+		// (which may be an infrastructure failure from the handler
+		// above, not merely an unknown handle) is still worth a
+		// server-side record.
+		s.logger.DebugContext(ctx, "webauthn login verification failed", "error", err)
 		return domain.MemberID{}, fmt.Errorf("%w: %v", domain.ErrWebAuthnVerificationFailed, err)
 	}
 
@@ -246,12 +270,26 @@ func signCountSuspicious(newCount, storedCount uint32) bool {
 func (s *WebAuthnService) applyAssertionResult(ctx context.Context, memberID domain.MemberID, credentials []domain.WebAuthnCredential, parsedResponse *protocol.ParsedCredentialAssertionData) error {
 	newCount := parsedResponse.Response.AuthenticatorData.Counter
 
-	var storedCount uint32
+	var (
+		storedCount uint32
+		found       bool
+	)
 	for _, c := range credentials {
 		if bytes.Equal(c.CredentialID, parsedResponse.RawID) {
-			storedCount = c.SignCount
+			storedCount, found = c.SignCount, true
 			break
 		}
+	}
+	if !found {
+		// After a successful ValidatePasskeyLogin/ValidateLogin, the
+		// asserted credential should always be among the member's own —
+		// a miss here means credentials was stale or mismatched with
+		// parsedResponse.RawID, a defect worth a server-side record
+		// rather than a silently-disabled clone check (storedCount's
+		// zero value would otherwise make signCountSuspicious never
+		// flag, indistinguishable from a genuinely first-ever
+		// assertion).
+		s.logger.WarnContext(ctx, "webauthn: asserted credential missing from the member's stored set", "member_id", memberID.String())
 	}
 
 	if err := s.repo.UpdateAfterAssertion(ctx, parsedResponse.RawID, newCount, time.Now()); err != nil {

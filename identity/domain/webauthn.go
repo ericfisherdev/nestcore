@@ -24,6 +24,14 @@ var (
 	// consumed) challenge are all reported identically, so a caller
 	// cannot distinguish which one occurred.
 	ErrWebAuthnVerificationFailed = errors.New("identity: webauthn verification failed")
+	// ErrWebAuthnCredentialExists is returned by Create when
+	// cred.CredentialID is already registered — the WebAuthn credential id
+	// an authenticator generates is globally unique by construction, so
+	// this indicates the same physical credential is being registered a
+	// second time (defense in depth: the caller is expected to exclude a
+	// member's own existing credentials from a registration ceremony via
+	// WithExclusions, so this should not normally be reachable).
+	ErrWebAuthnCredentialExists = errors.New("identity: webauthn credential already registered")
 )
 
 // WebAuthnCredential is one member's registered passkey. A member may
@@ -74,8 +82,9 @@ type WebAuthnCredential struct {
 //   - ListByMember never returns ErrWebAuthnCredentialNotFound for a
 //     member with no credentials — it returns an empty slice.
 //   - Create returns ErrHouseholdNotFound when householdID does not
-//     exist, and ErrMemberNotFound when cred.MemberID does not belong to
-//     householdID (FK violations).
+//     exist, ErrMemberNotFound when cred.MemberID does not belong to
+//     householdID (FK violations), and ErrWebAuthnCredentialExists when
+//     cred.CredentialID is already registered (unique violation).
 //   - Rename and Delete return ErrWebAuthnCredentialNotFound when no row
 //     matches id scoped to BOTH memberID and householdID — a
 //     defense-in-depth tenant check.
@@ -84,7 +93,13 @@ type WebAuthnCredential struct {
 //     handle for a member whose last credential was since revoked
 //     (member_credential's composite tenant FK cascades on member
 //     deletion, so a resolvable handle always names a member that still
-//     exists).
+//     exists). Implementations must also return an error (never silently
+//     pick one) if handle's rows resolve to more than one DISTINCT
+//     member — user_handle carries no uniqueness constraint (it is a
+//     plain index, see the migration's own doc), so this is the
+//     defense-in-depth guard against a handle collision (an HMAC-derived
+//     handle colliding across members, or a derivation defect) silently
+//     authenticating the wrong member.
 //   - UpdateAfterAssertion returns ErrWebAuthnCredentialNotFound only
 //     when credentialID matches no row at all — defense-in-depth only; a
 //     caller only ever supplies a credentialID that a preceding

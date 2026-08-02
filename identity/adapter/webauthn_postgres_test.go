@@ -3,6 +3,7 @@ package adapter_test
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,7 +25,11 @@ func newTestWebAuthnCredentialRepo(t *testing.T) (*adapter.WebAuthnCredentialRep
 }
 
 // testWebAuthnCredential builds a fully populated WebAuthnCredential for
-// memberID, ready for Create.
+// memberID, ready for Create. UserHandle is unique per call (not a fixed
+// literal): these tests share one database via
+// NESTCORE_TEST_DATABASE_URL, and rows accumulate across runs, so a
+// fixed handle would let unrelated members' credentials collide under
+// FindByUserHandle in a way no test here intends to exercise.
 func testWebAuthnCredential(memberID domain.MemberID, credentialID []byte, nickname string) *domain.WebAuthnCredential {
 	aaguid := uuid.Must(uuid.NewRandom())
 	return &domain.WebAuthnCredential{
@@ -36,7 +41,7 @@ func testWebAuthnCredential(memberID domain.MemberID, credentialID []byte, nickn
 		Transports:   []string{"internal", "hybrid"},
 		AAGUID:       &aaguid,
 		Nickname:     nickname,
-		UserHandle:   []byte("a-derived-user-handle"),
+		UserHandle:   []byte("a-derived-user-handle-" + uuid.Must(uuid.NewRandom()).String()),
 	}
 }
 
@@ -74,8 +79,8 @@ func TestWebAuthnCredentialCreate_PersistsAndListByMemberReturnsIt(t *testing.T)
 	if got.AAGUID == nil || *got.AAGUID != *cred.AAGUID {
 		t.Errorf("AAGUID = %v, want %v", got.AAGUID, cred.AAGUID)
 	}
-	if len(got.Transports) != 2 {
-		t.Errorf("Transports = %v, want 2 entries", got.Transports)
+	if !slices.Equal(got.Transports, cred.Transports) {
+		t.Errorf("Transports = %v, want %v", got.Transports, cred.Transports)
 	}
 	if got.LastUsedAt != nil {
 		t.Error("a freshly registered credential must have a nil LastUsedAt")
@@ -360,11 +365,8 @@ func TestWebAuthnCredentialCreate_DuplicateCredentialIDRejected(t *testing.T) {
 
 	second := testWebAuthnCredential(memberID, credentialID, "Second")
 	err := repo.Create(testCtx(t), householdID, second)
-	if err == nil {
-		t.Fatal("Create with a duplicate credential_id must fail")
-	}
-	if errors.Is(err, domain.ErrMemberNotFound) {
-		t.Errorf("duplicate credential_id was misreported as ErrMemberNotFound: %v", err)
+	if !errors.Is(err, domain.ErrWebAuthnCredentialExists) {
+		t.Errorf("Create with a duplicate credential_id: err = %v, want ErrWebAuthnCredentialExists", err)
 	}
 }
 

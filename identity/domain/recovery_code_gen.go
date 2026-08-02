@@ -56,16 +56,23 @@ func GenerateRecoveryCode() (string, error) {
 	return sb.String(), nil
 }
 
-// NormalizeRecoveryCode uppercases, strips whitespace/dashes, and folds
-// visually-confusable characters a member might type (O→0, I/L→1) before
-// hashing or comparison, so a code entered with or without dashes, in
-// either case, verifies identically.
+// NormalizeRecoveryCode uppercases and folds visually-confusable
+// characters a member might type (O→0, I/L→1), then keeps only symbols
+// from recoveryCodeAlphabet — an allow-list rather than stripping just
+// the ASCII dash and space a member is expected to type: a code pasted
+// from a password manager, a PDF, or a mobile keyboard's autocorrect can
+// carry a tab, a non-breaking space, or an en/em dash instead, and a
+// deny-list of only "-"/" " would leave those in place and silently fail
+// to match the stored hash. ToUpper must run before the alias fold, so a
+// lowercase o/i/l is still folded.
 func NormalizeRecoveryCode(s string) string {
-	s = strings.ToUpper(strings.TrimSpace(s))
-	s = strings.ReplaceAll(s, "-", "")
-	s = strings.ReplaceAll(s, " ", "")
-	s = recoveryCodeAliases.Replace(s)
-	return s
+	s = recoveryCodeAliases.Replace(strings.ToUpper(s))
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(recoveryCodeAlphabet, r) {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 // recoveryCodeAliases folds characters a member might type that are not

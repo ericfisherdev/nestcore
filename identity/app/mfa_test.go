@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +20,13 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeMFARepo is an in-memory domain.MFARepository.
+// fakeMFARepo is an in-memory domain.MFARepository. mu guards every map
+// access so tests can exercise it from concurrent goroutines (e.g. a
+// concurrent replay of RecordLoginStep's atomic guard) without racing
+// the fake itself — a concern distinct from the guard's own atomicity,
+// which this fake still only approximates with a coarse lock.
 type fakeMFARepo struct {
+	mu          sync.Mutex
 	enrollments map[domain.MemberID]*domain.MFAEnrollment
 	codes       map[domain.MemberID][]domain.RecoveryCode
 }
@@ -33,6 +39,8 @@ func newFakeMFARepo() *fakeMFARepo {
 }
 
 func (f *fakeMFARepo) GetEnrollment(_ context.Context, memberID domain.MemberID) (*domain.MFAEnrollment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	e, ok := f.enrollments[memberID]
 	if !ok {
 		return nil, domain.ErrMFANotEnrolled
@@ -42,6 +50,8 @@ func (f *fakeMFARepo) GetEnrollment(_ context.Context, memberID domain.MemberID)
 }
 
 func (f *fakeMFARepo) BeginEnrollment(_ context.Context, memberID domain.MemberID, householdID domain.HouseholdID, secretEnc []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if existing, ok := f.enrollments[memberID]; ok {
 		if existing.HouseholdID != householdID {
 			return domain.ErrMemberNotFound
@@ -55,6 +65,8 @@ func (f *fakeMFARepo) BeginEnrollment(_ context.Context, memberID domain.MemberI
 }
 
 func (f *fakeMFARepo) ConfirmEnrollmentWithCodes(_ context.Context, memberID domain.MemberID, hashes []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	e, ok := f.enrollments[memberID]
 	if !ok {
 		return domain.ErrMFANotEnrolled
@@ -74,6 +86,8 @@ func (f *fakeMFARepo) ConfirmEnrollmentWithCodes(_ context.Context, memberID dom
 }
 
 func (f *fakeMFARepo) DeleteEnrollment(_ context.Context, householdID domain.HouseholdID, memberID domain.MemberID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	e, ok := f.enrollments[memberID]
 	if !ok || e.HouseholdID != householdID {
 		return domain.ErrMFANotEnrolled
@@ -84,6 +98,8 @@ func (f *fakeMFARepo) DeleteEnrollment(_ context.Context, householdID domain.Hou
 }
 
 func (f *fakeMFARepo) ListUnusedRecoveryCodes(_ context.Context, memberID domain.MemberID) ([]domain.RecoveryCode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []domain.RecoveryCode
 	for _, c := range f.codes[memberID] {
 		if !c.Used() {
@@ -94,6 +110,8 @@ func (f *fakeMFARepo) ListUnusedRecoveryCodes(_ context.Context, memberID domain
 }
 
 func (f *fakeMFARepo) MarkRecoveryCodeUsed(_ context.Context, codeID domain.RecoveryCodeID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for memberID, codes := range f.codes {
 		for i := range codes {
 			if codes[i].ID == codeID {
@@ -108,6 +126,8 @@ func (f *fakeMFARepo) MarkRecoveryCodeUsed(_ context.Context, codeID domain.Reco
 }
 
 func (f *fakeMFARepo) RecordLoginStep(_ context.Context, memberID domain.MemberID, step int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	e, ok := f.enrollments[memberID]
 	if !ok {
 		return domain.ErrInvalidTOTPCode
@@ -161,7 +181,9 @@ func (f *fakeTOTPProvider) MatchStep(code, secret string) (int64, bool) {
 // Fixture
 // ---------------------------------------------------------------------------
 
-func discardLogger() (*slog.Logger, *bytes.Buffer) {
+// captureLogger returns a logger that writes to the returned buffer, so
+// tests can assert on what was and was not logged.
+func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
 }
@@ -193,7 +215,7 @@ func newMFAFixture(t *testing.T) *mfaFixture {
 	t.Helper()
 	repo := newFakeMFARepo()
 	totpFake := &fakeTOTPProvider{secret: "JBSWY3DPEHPK3PXP", otpauthURL: "otpauth://totp/Nestcore:alice?secret=JBSWY3DPEHPK3PXP&issuer=Nestcore", validCode: "123456"}
-	logger, buf := discardLogger()
+	logger, buf := captureLogger()
 	svc, err := app.NewMFAService(repo, testCipher(t), totpFake, cryptotest.Hasher(), logger)
 	if err != nil {
 		t.Fatalf("NewMFAService: %v", err)
@@ -266,14 +288,27 @@ func TestBeginEnrollment_ReplacesUnconfirmedEnrollment(t *testing.T) {
 	if _, _, err := f.svc.BeginEnrollment(context.Background(), memberID, householdID, "Nestcore", "Alice"); err != nil {
 		t.Fatalf("first BeginEnrollment: %v", err)
 	}
+	first, err := f.repo.GetEnrollment(context.Background(), memberID)
+	if err != nil {
+		t.Fatalf("GetEnrollment after first BeginEnrollment: %v", err)
+	}
+	firstEnc := append([]byte(nil), first.TOTPSecretEnc...)
+
 	f.totp.secret = "ANOTHERSECRETVALUE"
-	if _, _, err := f.svc.BeginEnrollment(context.Background(), memberID, householdID, "Nestcore", "Alice"); err != nil {
+	secret, _, err := f.svc.BeginEnrollment(context.Background(), memberID, householdID, "Nestcore", "Alice")
+	if err != nil {
 		t.Fatalf("second BeginEnrollment (re-enroll over unconfirmed): %v", err)
+	}
+	if secret != "ANOTHERSECRETVALUE" {
+		t.Errorf("second BeginEnrollment returned secret %q, want the newly generated one", secret)
 	}
 
 	enrollment, err := f.repo.GetEnrollment(context.Background(), memberID)
 	if err != nil {
 		t.Fatalf("GetEnrollment: %v", err)
+	}
+	if bytes.Equal(enrollment.TOTPSecretEnc, firstEnc) {
+		t.Error("the second BeginEnrollment must replace the stored secret, not keep the first")
 	}
 	if enrollment.Confirmed() {
 		t.Error("a replaced enrollment must still be unconfirmed")
@@ -388,8 +423,11 @@ func TestConfirmEnrollment_ValidCode_ActivatesAndReturnsTenRecoveryCodes(t *test
 		t.Fatalf("stored %d unused recovery codes, want 10", len(unused))
 	}
 	for _, c := range unused {
-		if c.CodeHash == codes[0] || !strings.HasPrefix(c.CodeHash, "$argon2id$") {
-			t.Errorf("recovery code hash %q does not look like an argon2id PHC string (or stores the raw code)", c.CodeHash)
+		if seen[c.CodeHash] {
+			t.Errorf("a raw recovery code was stored instead of its hash: %q", c.CodeHash)
+		}
+		if !strings.HasPrefix(c.CodeHash, "$argon2id$") {
+			t.Errorf("recovery code hash %q does not look like an argon2id PHC string", c.CodeHash)
 		}
 	}
 }
@@ -543,6 +581,34 @@ func TestDisenroll_UnconfirmedEnrollment_NotEnrolled(t *testing.T) {
 	}
 }
 
+// TestDisenroll_ValidTOTPCode_RemovesEnrollment covers the most common
+// disenroll path — a member submitting a valid TOTP code against a
+// confirmed enrollment — which every OTHER Disenroll test in this file
+// bypasses (they use a recovery code, an invalid one, no credential, or
+// an unconfirmed enrollment).
+func TestDisenroll_ValidTOTPCode_RemovesEnrollment(t *testing.T) {
+	t.Parallel()
+	f := newMFAFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	confirmEnrollment(t, f.svc, memberID, householdID)
+
+	if err := f.svc.Disenroll(context.Background(), memberID, householdID, "123456", ""); err != nil {
+		t.Fatalf("Disenroll with a valid TOTP code: %v", err)
+	}
+
+	if _, err := f.repo.GetEnrollment(context.Background(), memberID); !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("GetEnrollment after Disenroll: err = %v, want ErrMFANotEnrolled", err)
+	}
+	unused, err := f.repo.ListUnusedRecoveryCodes(context.Background(), memberID)
+	if err != nil {
+		t.Fatalf("ListUnusedRecoveryCodes: %v", err)
+	}
+	if len(unused) != 0 {
+		t.Errorf("recovery codes remaining after Disenroll = %d, want 0", len(unused))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // VerifyLoginCode — login-time TOTP/recovery verification with a durable
 // replay guard (AC1).
@@ -627,6 +693,63 @@ func TestVerifyLoginCode_LowerStepRejectedAfterHigherAccepted(t *testing.T) {
 	err := f.svc.VerifyLoginCode(context.Background(), memberID, "111111", "")
 	if !errors.Is(err, domain.ErrInvalidTOTPCode) {
 		t.Errorf("VerifyLoginCode at an earlier step than already accepted: err = %v, want ErrInvalidTOTPCode", err)
+	}
+
+	// The guard must also still ADMIT a fresh, strictly-later step — a
+	// regression that rejected every step after the first would
+	// permanently lock a member out while this suite stayed green if
+	// this case were never exercised.
+	f.totp.loginCode = "333333"
+	f.totp.loginStep = 101
+	if err := f.svc.VerifyLoginCode(context.Background(), memberID, "333333", ""); err != nil {
+		t.Fatalf("VerifyLoginCode at a later step than already accepted: %v", err)
+	}
+}
+
+// TestVerifyLoginCode_ConcurrentReplay_ExactlyOneWins exercises
+// RecordLoginStep's atomic guard concurrently — the last line of defense
+// against two logins racing the SAME captured code (e.g. a replayed
+// request landing on two backend instances simultaneously): both
+// goroutines read the enrollment's LastTOTPStep as nil (their own
+// GetEnrollment snapshot, taken before either write), so the
+// service-level check at verifyLoginTOTP alone cannot reject either one
+// — only the repository's serialized, conditional write can, and
+// verifyLoginTOTP must map the loser's rejection back to
+// domain.ErrInvalidTOTPCode (not a wrapped internal error) per the
+// no-oracle contract fixed alongside this test.
+func TestVerifyLoginCode_ConcurrentReplay_ExactlyOneWins(t *testing.T) {
+	t.Parallel()
+	f := newMFAFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	confirmEnrollment(t, f.svc, memberID, householdID)
+	f.totp.loginCode = "654321"
+	f.totp.loginStep = 42
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := range errs {
+		go func() {
+			defer wg.Done()
+			errs[i] = f.svc.VerifyLoginCode(context.Background(), memberID, "654321", "")
+		}()
+	}
+	wg.Wait()
+
+	successes := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, domain.ErrInvalidTOTPCode):
+			// Expected outcome for the loser.
+		default:
+			t.Errorf("racing VerifyLoginCode call %d: unexpected error %v (want nil or ErrInvalidTOTPCode, never a wrapped internal error)", i, err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("racing VerifyLoginCode with the identical replayed code: %d succeeded, want exactly 1", successes)
 	}
 }
 
@@ -788,7 +911,7 @@ func TestConfirmEnrollment_DecryptsFixtureSealedWithMatchingAESGCMParameters(t *
 		TOTPSecretEnc: sealedFixture,
 	}
 	totpFake := &fakeTOTPProvider{secret: fixtureSecret, validCode: "123456"}
-	logger, _ := discardLogger()
+	logger, _ := captureLogger()
 	svc, err := app.NewMFAService(repo, cipher, totpFake, cryptotest.Hasher(), logger)
 	if err != nil {
 		t.Fatalf("NewMFAService: %v", err)

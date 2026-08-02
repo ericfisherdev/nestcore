@@ -166,6 +166,18 @@ func (s *MFAService) ConfirmEnrollment(ctx context.Context, memberID domain.Memb
 // domain.ErrMFANotEnrolled when the member has no confirmed enrollment,
 // domain.ErrInvalidTOTPCode / ErrRecoveryCodeInvalid when the supplied
 // credential does not verify.
+//
+// The TOTP check here (via verifyTOTPOrRecovery) is deliberately NOT
+// step-replay-guarded the way VerifyLoginCode's login check is: Disenroll
+// is called from an already-authenticated settings context (the member
+// re-enters their current code as step-up confirmation, not as the login
+// credential itself), so a caller composing Disenroll on top of this
+// service is expected to require its own fresh authenticated session
+// first. A code captured during a genuine login (e.g. via a phishing
+// proxy) replaying here within the same 30-second step is a real
+// residual risk of that composition, not one this method alone can
+// close without also refusing a member's second legitimate action inside
+// one step.
 func (s *MFAService) Disenroll(ctx context.Context, memberID domain.MemberID, householdID domain.HouseholdID, totpCode, recoveryCode string) error {
 	if err := s.verifyTOTPOrRecovery(ctx, memberID, totpCode, recoveryCode); err != nil {
 		return err
@@ -210,21 +222,20 @@ func (s *MFAService) VerifyLoginCode(ctx context.Context, memberID domain.Member
 		case err == nil:
 			return nil
 		case !errors.Is(err, domain.ErrInvalidTOTPCode) || recoveryCode == "":
+			if errors.Is(err, domain.ErrInvalidTOTPCode) {
+				s.logger.WarnContext(ctx, "mfa login totp verification failed", "member_id", memberID.String())
+			}
 			return err
 		}
 		// Fell through: the TOTP code was wrong (not a hard error) AND
 		// a recovery code was ALSO supplied — try it next.
 	}
 
-	codeID, ok, err := s.matchRecoveryCode(ctx, memberID, recoveryCode)
-	if err != nil {
+	if err := s.consumeRecoveryCode(ctx, memberID, recoveryCode); err != nil {
+		if errors.Is(err, domain.ErrRecoveryCodeInvalid) {
+			s.logger.WarnContext(ctx, "mfa login recovery code verification failed", "member_id", memberID.String())
+		}
 		return err
-	}
-	if !ok {
-		return domain.ErrRecoveryCodeInvalid
-	}
-	if err := s.repo.MarkRecoveryCodeUsed(ctx, codeID); err != nil {
-		return fmt.Errorf("mfa: mark recovery code used: %w", err)
 	}
 	s.logger.InfoContext(ctx, "mfa login verified via recovery code", "member_id", memberID.String())
 	return nil
@@ -273,7 +284,16 @@ func (s *MFAService) verifyTOTPOrRecovery(ctx context.Context, memberID domain.M
 		}
 	}
 
-	codeID, ok, err := s.matchRecoveryCode(ctx, memberID, recoveryCode)
+	return s.consumeRecoveryCode(ctx, memberID, recoveryCode)
+}
+
+// consumeRecoveryCode matches raw against memberID's unused recovery
+// codes and marks the matched code used. It returns
+// domain.ErrRecoveryCodeInvalid when no code matches — the shared tail
+// of verifyTOTPOrRecovery's and VerifyLoginCode's recovery-code path, so
+// the two verification flows cannot drift apart as this service grows.
+func (s *MFAService) consumeRecoveryCode(ctx context.Context, memberID domain.MemberID, raw string) error {
+	codeID, ok, err := s.matchRecoveryCode(ctx, memberID, raw)
 	if err != nil {
 		return err
 	}
@@ -309,6 +329,16 @@ func (s *MFAService) verifyLoginTOTP(ctx context.Context, memberID domain.Member
 		return domain.ErrInvalidTOTPCode
 	}
 	if err := s.repo.RecordLoginStep(ctx, memberID, step); err != nil {
+		if errors.Is(err, domain.ErrInvalidTOTPCode) {
+			// RecordLoginStep's own atomic guard rejected this step — a
+			// concurrent login for a later (or equal) step won the race
+			// since the read above. Report it exactly as a wrong code,
+			// per VerifyLoginCode's own no-oracle doc: a caller must not
+			// be able to distinguish this from a code that was never
+			// valid in the first place, and wrapping it with additional
+			// text would leak that distinction through err.Error().
+			return domain.ErrInvalidTOTPCode
+		}
 		return fmt.Errorf("mfa: record login step: %w", err)
 	}
 	s.logger.InfoContext(ctx, "mfa login verified via totp", "member_id", memberID.String())

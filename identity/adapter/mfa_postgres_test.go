@@ -199,6 +199,38 @@ func TestMFABeginEnrollment_CrossHouseholdCannotTouchVictimRow(t *testing.T) {
 	}
 }
 
+// TestMFABeginEnrollment_ConcurrentFirstEnrollment_NoOpaqueError covers
+// the race gap in beginEnrollmentOnce's own doc: SELECT ... FOR UPDATE
+// takes no lock when zero rows match, so two callers racing a member's
+// FIRST-EVER enrollment can both reach the INSERT branch. Both must
+// resolve to nil or a domain error — never an opaque wrapped unique-
+// violation error — and the row must be left in a normal, retrievable
+// state afterward.
+func TestMFABeginEnrollment_ConcurrentFirstEnrollment_NoOpaqueError(t *testing.T) {
+	repo, householdID, memberID := newTestMFARepo(t)
+	ctx := testCtx(t)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := range errs {
+		go func() {
+			defer wg.Done()
+			errs[i] = repo.BeginEnrollment(ctx, memberID, householdID, []byte("secret"))
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("racing first-time BeginEnrollment call %d: err = %v, want nil", i, err)
+		}
+	}
+	if _, err := repo.GetEnrollment(ctx, memberID); err != nil {
+		t.Errorf("GetEnrollment after the race: %v", err)
+	}
+}
+
 func TestMFAGetEnrollment_NotEnrolled(t *testing.T) {
 	repo, _, memberID := newTestMFARepo(t)
 	_, err := repo.GetEnrollment(testCtx(t), memberID)
@@ -380,6 +412,9 @@ func TestMFAMarkRecoveryCodeUsed_ExcludesFromUnusedList(t *testing.T) {
 	codes, err := repo.ListUnusedRecoveryCodes(testCtx(t), memberID)
 	if err != nil {
 		t.Fatalf("ListUnusedRecoveryCodes: %v", err)
+	}
+	if len(codes) != 3 {
+		t.Fatalf("seeded recovery codes = %d, want 3", len(codes))
 	}
 	target := codes[0].ID
 
