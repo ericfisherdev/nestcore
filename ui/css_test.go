@@ -33,13 +33,18 @@ func TestThemeAndBaseCSS_DeclareNoHexValues(t *testing.T) {
 // follows a snippet missing it ships without the shell's @font-face,
 // [x-cloak], and cursor rules.
 func TestDocImportSnippets_IncludeBaseCSS(t *testing.T) {
+	// The exact import line, not just any mention of the path — doc.go's
+	// own prose ("The shell's CSS (ui/css/base.css and ui/css/theme.css)
+	// is written entirely...") also contains the substring "ui/css/base.css",
+	// so a looser check would pass even if the import line itself were removed.
+	want := `@import "<path-to-nestcore>/ui/css/base.css";`
 	for _, path := range []string{"doc.go", "css/theme.css"} {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)
 		}
-		if !strings.Contains(string(content), "ui/css/base.css") {
-			t.Errorf("%s's import snippet doesn't mention ui/css/base.css", path)
+		if !strings.Contains(string(content), want) {
+			t.Errorf("%s's import snippet doesn't contain %q", path, want)
 		}
 	}
 }
