@@ -108,9 +108,13 @@ func (c RecoveryCode) Used() bool {
 //   - ListUnusedRecoveryCodes returns every not-yet-used recovery code
 //     for memberID (never used ones), for verifying a submitted code
 //     against.
-//   - MarkRecoveryCodeUsed sets used_at = now on the given code id. It is
-//     the caller's responsibility to have already matched the code's
-//     hash.
+//   - MarkRecoveryCodeUsed sets used_at = now on the given code id, IF
+//     AND ONLY IF the code is still unused — implementations must apply
+//     this as a single conditional UPDATE (not a read-then-write), so two
+//     concurrent redemptions of the same code can never both succeed.
+//     Returns ErrRecoveryCodeInvalid when the code does not exist or has
+//     already been used. It is the caller's responsibility to have
+//     already matched the code's hash.
 //   - RecordLoginStep durably persists step as memberID's last-accepted
 //     login TOTP step, IF AND ONLY IF the stored value is still nil or
 //     strictly less than step — an atomic, race-safe replay guard

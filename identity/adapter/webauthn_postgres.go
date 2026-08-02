@@ -89,9 +89,10 @@ func (r *WebAuthnCredentialRepository) ListByMember(ctx context.Context, memberI
 }
 
 // Create persists a newly registered credential. Returns
-// domain.ErrHouseholdNotFound when householdID does not exist, and
+// domain.ErrHouseholdNotFound when householdID does not exist,
 // domain.ErrMemberNotFound when cred.MemberID does not belong to
-// householdID (FK violations).
+// householdID (FK violations), and domain.ErrWebAuthnCredentialExists
+// when cred.CredentialID is already registered (unique violation).
 func (r *WebAuthnCredentialRepository) Create(ctx context.Context, householdID domain.HouseholdID, cred *domain.WebAuthnCredential) error {
 	const q = `
 		INSERT INTO identity.member_credential
@@ -104,7 +105,7 @@ func (r *WebAuthnCredentialRepository) Create(ctx context.Context, householdID d
 		cred.Transports, cred.AAGUID, cred.Nickname, cred.UserHandle,
 	)
 	if err != nil {
-		if mapped := mapWebAuthnCredentialFKViolation(err); mapped != nil {
+		if mapped := mapWebAuthnCredentialViolation(err); mapped != nil {
 			return mapped
 		}
 		return fmt.Errorf("create webauthn credential: %w", err)
@@ -112,19 +113,21 @@ func (r *WebAuthnCredentialRepository) Create(ctx context.Context, householdID d
 	return nil
 }
 
-// mapWebAuthnCredentialFKViolation maps a member_credential FK violation
-// to its domain sentinel, or nil when err is not a recognized FK
-// violation.
-func mapWebAuthnCredentialFKViolation(err error) error {
+// mapWebAuthnCredentialViolation maps a member_credential constraint
+// violation to its domain sentinel, or nil when err is not one of the
+// recognized violations.
+func mapWebAuthnCredentialViolation(err error) error {
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != foreignKeyViolation {
+	if !errors.As(err, &pgErr) {
 		return nil
 	}
-	switch pgErr.ConstraintName {
-	case webauthnCredentialHouseholdFK:
+	switch {
+	case pgErr.Code == foreignKeyViolation && pgErr.ConstraintName == webauthnCredentialHouseholdFK:
 		return domain.ErrHouseholdNotFound
-	case webauthnCredentialMemberFK:
+	case pgErr.Code == foreignKeyViolation && pgErr.ConstraintName == webauthnCredentialMemberFK:
 		return domain.ErrMemberNotFound
+	case pgErr.Code == uniqueViolation && pgErr.ConstraintName == webauthnCredentialIDUnique:
+		return domain.ErrWebAuthnCredentialExists
 	default:
 		return nil
 	}
@@ -217,6 +220,16 @@ func (r *WebAuthnCredentialRepository) FindByUserHandle(ctx context.Context, han
 		cred.HouseholdID = householdID
 		cred.MemberID = parsedMemberID
 		cred.AAGUID = aaguid
+		// user_handle carries no uniqueness constraint (a plain index —
+		// see the migration's own doc), so a collision across TWO
+		// members must fail loudly rather than silently resolve to
+		// whichever row happened to scan last: that would authenticate
+		// the wrong member.
+		if len(creds) > 0 && parsedMemberID != memberID {
+			return domain.MemberID{}, nil, fmt.Errorf(
+				"find webauthn credentials by user handle: handle resolves to more than one member (%s and %s)",
+				memberID, parsedMemberID)
+		}
 		memberID = parsedMemberID
 		creds = append(creds, cred)
 	}
@@ -248,11 +261,18 @@ func (r *WebAuthnCredentialRepository) FindByUserHandle(ctx context.Context, han
 // login or step-up, only skip a write that would have regressed stored
 // state backward in time.
 func (r *WebAuthnCredentialRepository) UpdateAfterAssertion(ctx context.Context, credentialID []byte, signCount uint32, usedAt time.Time) error {
+	// The guard's tie-break matters: two assertions can carry the SAME
+	// usedAt (e.g. a clock with coarser-than-actual resolution), and a
+	// plain "<=" would let a lower sign_count win that tie purely by
+	// arrival order, regressing the stored counter. Comparing sign_count
+	// too on an exact tie keeps the guard monotonic in BOTH dimensions.
 	const q = `
 		UPDATE identity.member_credential
 		   SET sign_count = $2, last_used_at = $3
 		 WHERE credential_id = $1
-		   AND (last_used_at IS NULL OR last_used_at <= $3)`
+		   AND (last_used_at IS NULL
+		        OR last_used_at < $3
+		        OR (last_used_at = $3 AND sign_count <= $2))`
 
 	tag, err := r.dbtx.Exec(ctx, q, credentialID, signCount, usedAt)
 	if err != nil {

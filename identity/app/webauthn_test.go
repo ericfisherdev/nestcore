@@ -20,6 +20,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 
 	"github.com/ericfisherdev/nestcore/identity/app"
 	"github.com/ericfisherdev/nestcore/identity/domain"
@@ -51,10 +52,10 @@ func (f *fakeWebAuthnCredentialRepo) Create(_ context.Context, householdID domai
 	return nil
 }
 
-func (f *fakeWebAuthnCredentialRepo) Rename(_ context.Context, _ domain.HouseholdID, memberID domain.MemberID, id domain.WebAuthnCredentialID, nickname string) error {
+func (f *fakeWebAuthnCredentialRepo) Rename(_ context.Context, householdID domain.HouseholdID, memberID domain.MemberID, id domain.WebAuthnCredentialID, nickname string) error {
 	creds := f.byMember[memberID]
 	for i := range creds {
-		if creds[i].ID == id {
+		if creds[i].ID == id && creds[i].HouseholdID == householdID {
 			creds[i].Nickname = nickname
 			return nil
 		}
@@ -62,15 +63,27 @@ func (f *fakeWebAuthnCredentialRepo) Rename(_ context.Context, _ domain.Househol
 	return domain.ErrWebAuthnCredentialNotFound
 }
 
-func (f *fakeWebAuthnCredentialRepo) Delete(_ context.Context, _ domain.HouseholdID, memberID domain.MemberID, id domain.WebAuthnCredentialID) error {
+func (f *fakeWebAuthnCredentialRepo) Delete(_ context.Context, householdID domain.HouseholdID, memberID domain.MemberID, id domain.WebAuthnCredentialID) error {
 	creds := f.byMember[memberID]
 	for i := range creds {
-		if creds[i].ID == id {
+		if creds[i].ID == id && creds[i].HouseholdID == householdID {
 			f.byMember[memberID] = append(creds[:i], creds[i+1:]...)
 			return nil
 		}
 	}
 	return domain.ErrWebAuthnCredentialNotFound
+}
+
+// total reports how many credentials the fake holds across all members,
+// so a test can assert the repository as a whole is untouched rather
+// than probing one unrelated, random member id (which trivially always
+// returns empty and proves nothing).
+func (f *fakeWebAuthnCredentialRepo) total() int {
+	n := 0
+	for _, creds := range f.byMember {
+		n += len(creds)
+	}
+	return n
 }
 
 func (f *fakeWebAuthnCredentialRepo) FindByUserHandle(_ context.Context, handle []byte) (domain.MemberID, []domain.WebAuthnCredential, error) {
@@ -368,7 +381,11 @@ func TestWebAuthnService_BeginRegistration_ReturnsCreationOptionsAndSession(t *t
 	if !bytes.Equal(session.UserID, wantHandle) {
 		t.Error("session.UserID does not match the member's derived handle")
 	}
-	if !bytes.Equal(creation.Response.User.ID.(protocol.URLEncodedBase64), wantHandle) {
+	gotUserID, ok := creation.Response.User.ID.(protocol.URLEncodedBase64)
+	if !ok {
+		t.Fatalf("creation options' user id has type %T, want protocol.URLEncodedBase64", creation.Response.User.ID)
+	}
+	if !bytes.Equal(gotUserID, wantHandle) {
 		t.Error("creation options' user id does not match the member's derived handle")
 	}
 }
@@ -467,6 +484,10 @@ func TestWebAuthnService_FinishRegistration_ValidResponse_PersistsCredential(t *
 	}
 	if len(got.PublicKey) == 0 {
 		t.Error("stored PublicKey is empty")
+	}
+	wantAAGUID := uuid.MustParse("8446ccb9-ab1d-b374-750b-2367ff6f3a1f")
+	if got.AAGUID == nil || *got.AAGUID != wantAAGUID {
+		t.Errorf("AAGUID = %v, want %v (the spec test vector's own attestation object)", got.AAGUID, wantAAGUID)
 	}
 }
 
@@ -624,8 +645,8 @@ func TestWebAuthnService_FinishLogin_UnknownUserHandle_Fails(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnVerificationFailed) {
 		t.Errorf("FinishLogin(unknown user handle): err = %v, want ErrWebAuthnVerificationFailed", err)
 	}
-	if creds, _ := repo.ListByMember(context.Background(), domain.NewMemberID()); len(creds) != 0 {
-		t.Error("sanity: no credential should exist anywhere")
+	if n := repo.total(); n != 0 {
+		t.Errorf("sanity: %d credentials exist, want none anywhere", n)
 	}
 }
 
@@ -880,6 +901,31 @@ func TestWebAuthnService_Revoke_NotFound(t *testing.T) {
 	err := svc.Revoke(context.Background(), domain.NewHouseholdID(), domain.NewMemberID(), domain.NewWebAuthnCredentialID())
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Revoke(unknown id): err = %v, want ErrWebAuthnCredentialNotFound", err)
+	}
+}
+
+// TestWebAuthnService_Revoke_WrongHousehold_Fails proves the fake now
+// enforces the same tenant scoping the real pgx adapter's own
+// WrongHousehold tests already cover — without this check in the fake, a
+// regression that dropped householdID from WebAuthnService.Revoke's call
+// to the repository would pass every app-level test in this file.
+func TestWebAuthnService_Revoke_WrongHousehold_Fails(t *testing.T) {
+	t.Parallel()
+	svc, repo, _ := newWebAuthnServiceFixture(t)
+	memberID := domain.NewMemberID()
+	id := domain.NewWebAuthnCredentialID()
+	if err := repo.Create(context.Background(), domain.NewHouseholdID(), &domain.WebAuthnCredential{
+		ID: id, MemberID: memberID, CredentialID: []byte("cred"), PublicKey: []byte("pk"), Nickname: "Device",
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	err := svc.Revoke(context.Background(), domain.NewHouseholdID(), memberID, id)
+	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
+		t.Errorf("Revoke(other household): err = %v, want ErrWebAuthnCredentialNotFound", err)
+	}
+	if creds, _ := repo.ListByMember(context.Background(), memberID); len(creds) != 1 {
+		t.Error("a cross-tenant revoke must not remove the credential")
 	}
 }
 
