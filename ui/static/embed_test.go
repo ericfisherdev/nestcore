@@ -56,6 +56,23 @@ func TestHandler_MissingAssetIs404(t *testing.T) {
 	}
 }
 
+// TestHandler_MissingAssetHasNoCacheControl guards against a 404 for a
+// missing asset getting cached immutable for a year — a client that
+// requested a not-yet-shipped asset would then never see it once a later
+// release actually adds it.
+func TestHandler_MissingAssetHasNoCacheControl(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle(static.MountPath, http.StripPrefix(static.MountPath, static.Handler()))
+
+	req := httptest.NewRequest(http.MethodGet, static.MountPath+"js/does-not-exist.js", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("Cache-Control = %q on a 404 response, want unset", got)
+	}
+}
+
 // TestHandler_SetsImmutableCacheControl guards against the shell's ~145 KB
 // of fonts/JS shipping with no freshness or revalidation signal at all —
 // embed.FS's zero ModTime means net/http never emits a Last-Modified either,
