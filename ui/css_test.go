@@ -27,6 +27,23 @@ func TestThemeAndBaseCSS_DeclareNoHexValues(t *testing.T) {
 	}
 }
 
+// TestDocImportSnippets_IncludeBaseCSS guards against the two copy-pasteable
+// Tailwind entry-point snippets (package ui's doc and theme.css's own doc
+// comment) drifting apart on whether base.css is imported — an app that
+// follows a snippet missing it ships without the shell's @font-face,
+// [x-cloak], and cursor rules.
+func TestDocImportSnippets_IncludeBaseCSS(t *testing.T) {
+	for _, path := range []string{"doc.go", "css/theme.css"} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		if !strings.Contains(string(content), "ui/css/base.css") {
+			t.Errorf("%s's import snippet doesn't mention ui/css/base.css", path)
+		}
+	}
+}
+
 func TestBaseCSS_FontURLsMatchStaticMountPath(t *testing.T) {
 	content, err := os.ReadFile("css/base.css")
 	if err != nil {
