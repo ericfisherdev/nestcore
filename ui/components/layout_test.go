@@ -151,12 +151,44 @@ func TestLayout_NoExternalHosts(t *testing.T) {
 	}
 }
 
-// assertNoExternalHosts scans every href/src attribute value in html and
-// fails if any resolves to an absolute URL naming a host — relative paths,
-// fragments, and protocol-relative-free absolute paths are the only
-// self-hosted-compatible forms.
+// TestExternalHosts_DetectsExternalReferences proves externalHosts can
+// actually fail: without it, a bug in the hand-rolled attribute scan (a
+// wrong idx advance, an attribute form it doesn't recognize) could leave
+// TestLayout_NoExternalHosts green while asserting nothing at all. Covers
+// both an absolute external URL and the protocol-relative form, which is
+// the shape most likely to slip past a hand-rolled scan.
+func TestExternalHosts_DetectsExternalReferences(t *testing.T) {
+	html := `<link href="https://fonts.googleapis.com/css2">` +
+		`<script src="//cdn.example.com/htmx.min.js"></script>` +
+		`<a href="/bins">ok</a>`
+
+	got := externalHosts(t, html, 0)
+	want := []string{"fonts.googleapis.com", "cdn.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("externalHosts() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("externalHosts()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// assertNoExternalHosts fails the test if html names any external host.
 func assertNoExternalHosts(t *testing.T, html string, caseIndex int) {
 	t.Helper()
+	for _, host := range externalHosts(t, html, caseIndex) {
+		t.Errorf("case %d: markup names an external host %q", caseIndex, host)
+	}
+}
+
+// externalHosts scans every href/src attribute value in html and returns
+// the host of any that resolves to an absolute URL naming one — relative
+// paths, fragments, and protocol-relative-free absolute paths are the only
+// self-hosted-compatible forms and are excluded from the result.
+func externalHosts(t *testing.T, html string, caseIndex int) []string {
+	t.Helper()
+	var hosts []string
 	for _, attr := range []string{`href="`, `src="`} {
 		idx := 0
 		for {
@@ -180,11 +212,12 @@ func assertNoExternalHosts(t *testing.T, html string, caseIndex int) {
 				t.Fatalf("case %d: parsing %s=%q: %v", caseIndex, attr, value, err)
 			}
 			if u.Host != "" {
-				t.Errorf("case %d: %s=%q names an external host %q", caseIndex, attr, value, u.Host)
+				hosts = append(hosts, u.Host)
 			}
 			if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
 				t.Errorf("case %d: %s=%q uses disallowed scheme %q", caseIndex, attr, value, u.Scheme)
 			}
 		}
 	}
+	return hosts
 }
