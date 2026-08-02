@@ -5,7 +5,7 @@ package components
 // inactive pill is quiet until hovered.
 templ NavPill(label, href string, active bool) {
 	<a
-		href={ templ.SafeURL(href) }
+		href={ href }
 		class={ "block rounded-control px-3 py-2 font-medium transition-colors", navPillClass(active) }
 		if active {
 			aria-current="page"

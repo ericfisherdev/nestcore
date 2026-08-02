@@ -57,13 +57,13 @@ templ Layout(props ShellProps, nav []NavItem, content templ.Component) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ props.AppName }</title>
 			if props.FaviconHref != "" {
-				<link rel="icon" href={ templ.SafeURL(props.FaviconHref) }/>
+				<link rel="icon" href={ props.FaviconHref }/>
 			}
 			if props.ThemeColor != "" {
 				<meta name="theme-color" content={ props.ThemeColor }/>
 			}
 			if props.StylesheetHref != "" {
-				<link rel="stylesheet" href={ templ.SafeURL(props.StylesheetHref) }/>
+				<link rel="stylesheet" href={ props.StylesheetHref }/>
 			}
 			<!-- htmx by default never swaps a 4xx/5xx response into the DOM (see
 			     htmx's own QUIRKS.md, "By Default 4xx & 5xx Responses Do Not
