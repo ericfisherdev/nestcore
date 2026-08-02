@@ -25,11 +25,13 @@ func newTestWebAuthnCredentialRepo(t *testing.T) (*adapter.WebAuthnCredentialRep
 }
 
 // testWebAuthnCredential builds a fully populated WebAuthnCredential for
-// memberID, ready for Create. UserHandle is unique per call (not a fixed
-// literal): these tests share one database via
-// NESTCORE_TEST_DATABASE_URL, and rows accumulate across runs, so a
-// fixed handle would let unrelated members' credentials collide under
-// FindByUserHandle in a way no test here intends to exercise.
+// memberID, ready for Create. UserHandle is randomized per call (not a
+// fixed literal) purely so a test that seeds several members in the SAME
+// run (e.g. via newTestWebAuthnCredentialRepo, called once per member)
+// never accidentally shares a handle across them — NewIsolatedPool resets
+// the schema at the start of every call, so no state actually survives
+// between separate test runs or even between two top-level tests in this
+// package.
 func testWebAuthnCredential(memberID domain.MemberID, credentialID []byte, nickname string) *domain.WebAuthnCredential {
 	aaguid := uuid.Must(uuid.NewRandom())
 	return &domain.WebAuthnCredential{
@@ -53,7 +55,7 @@ func TestWebAuthnCredentialCreate_PersistsAndListByMemberReturnsIt(t *testing.T)
 		t.Fatalf("Create: %v", err)
 	}
 
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -95,7 +97,7 @@ func TestWebAuthnCredentialCreate_NilAAGUID_StoresNull(t *testing.T) {
 	if err := repo.Create(testCtx(t), householdID, cred); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -143,7 +145,7 @@ func TestWebAuthnCredentialCreate_CrossHouseholdMemberRejected(t *testing.T) {
 		t.Errorf("Create for a real member under a real household that is not theirs: err = %v, want ErrMemberNotFound", err)
 	}
 
-	creds, err := repo.ListByMember(testCtx(t), victim.ID)
+	creds, err := repo.ListByMember(testCtx(t), victim.HouseholdID, victim.ID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -154,7 +156,7 @@ func TestWebAuthnCredentialCreate_CrossHouseholdMemberRejected(t *testing.T) {
 
 // TestWebAuthnCredentialCreate_UnknownHouseholdRejected covers the OTHER
 // half of member_credential's dual FK (see
-// mapWebAuthnCredentialFKViolation): a householdID that does not exist
+// mapWebAuthnCredentialViolation): a householdID that does not exist
 // AT ALL must trip the plain household_id FK
 // (member_credential_household_id_fkey) and map to
 // domain.ErrHouseholdNotFound, distinctly from the composite member FK's
@@ -170,8 +172,8 @@ func TestWebAuthnCredentialCreate_UnknownHouseholdRejected(t *testing.T) {
 }
 
 func TestWebAuthnCredentialListByMember_EmptyForNoCredentials(t *testing.T) {
-	repo, _, memberID := newTestWebAuthnCredentialRepo(t)
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	repo, householdID, memberID := newTestWebAuthnCredentialRepo(t)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -197,7 +199,7 @@ func TestWebAuthnCredentialListByMember_MultipleCredentials_OldestFirst(t *testi
 		t.Fatalf("Create (second): %v", err)
 	}
 
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -232,7 +234,7 @@ func TestWebAuthnCredentialRename_UpdatesNickname(t *testing.T) {
 	if err := repo.Rename(testCtx(t), householdID, memberID, cred.ID, "New Name"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -252,7 +254,7 @@ func TestWebAuthnCredentialRename_WrongMemberRejected(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Rename with the wrong member: err = %v, want ErrWebAuthnCredentialNotFound", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -272,7 +274,7 @@ func TestWebAuthnCredentialRename_WrongHouseholdRejected(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Rename with a mismatched household: err = %v, want ErrWebAuthnCredentialNotFound", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -299,7 +301,7 @@ func TestWebAuthnCredentialDelete_RemovesImmediately(t *testing.T) {
 	if err := repo.Delete(testCtx(t), householdID, memberID, cred.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -319,7 +321,7 @@ func TestWebAuthnCredentialDelete_WrongMemberRejected(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Delete with a mismatched member: err = %v, want ErrWebAuthnCredentialNotFound", err)
 	}
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -339,7 +341,7 @@ func TestWebAuthnCredentialDelete_WrongHouseholdRejected(t *testing.T) {
 	if !errors.Is(err, domain.ErrWebAuthnCredentialNotFound) {
 		t.Errorf("Delete with a mismatched household: err = %v, want ErrWebAuthnCredentialNotFound", err)
 	}
-	if creds, err := repo.ListByMember(testCtx(t), memberID); err != nil || len(creds) != 1 {
+	if creds, err := repo.ListByMember(testCtx(t), householdID, memberID); err != nil || len(creds) != 1 {
 		t.Error("the credential must survive a mismatched-household delete attempt")
 	}
 }
@@ -375,11 +377,10 @@ func TestWebAuthnCredentialCreate_DuplicateCredentialIDRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // testWebAuthnCredentialWithHandle is testWebAuthnCredential plus an
-// explicit UserHandle — unlike testWebAuthnCredential's own fixed
-// "a-derived-user-handle" (fine for tests that only ever seed ONE
-// member), FindByUserHandle's own tests need per-member,
-// per-test-controlled handles to actually exercise handle-scoped
-// lookup.
+// explicit UserHandle. testWebAuthnCredential randomizes the handle per
+// call, which suits tests that never look a handle up.
+// FindByUserHandle's own tests need per-member, caller-controlled
+// handles to exercise handle-scoped lookup.
 func testWebAuthnCredentialWithHandle(memberID domain.MemberID, credentialID, userHandle []byte, nickname string) *domain.WebAuthnCredential {
 	cred := testWebAuthnCredential(memberID, credentialID, nickname)
 	cred.UserHandle = userHandle
@@ -484,7 +485,7 @@ func TestWebAuthnCredentialUpdateAfterAssertion_UpdatesSignCountAndLastUsedAt(t 
 		t.Fatalf("UpdateAfterAssertion: %v", err)
 	}
 
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -525,7 +526,7 @@ func TestWebAuthnCredentialUpdateAfterAssertion_OutOfOrderDoesNotRegressState(t 
 		t.Fatalf("UpdateAfterAssertion (older, second write): %v", err)
 	}
 
-	creds, err := repo.ListByMember(testCtx(t), memberID)
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
 	if err != nil {
 		t.Fatalf("ListByMember: %v", err)
 	}
@@ -538,6 +539,40 @@ func TestWebAuthnCredentialUpdateAfterAssertion_OutOfOrderDoesNotRegressState(t 
 	}
 	if got.LastUsedAt == nil || !got.LastUsedAt.Equal(newer) {
 		t.Errorf("LastUsedAt after an out-of-order older write = %v, want %v (the newer write must win)", got.LastUsedAt, newer)
+	}
+}
+
+// TestWebAuthnCredentialUpdateAfterAssertion_SameUsedAtKeepsHigherSignCount
+// covers the guard's tie-break clause specifically: two assertions can
+// carry the SAME usedAt (e.g. a clock with coarser-than-actual
+// resolution), and the lower sign_count must not win on arrival order —
+// see the guard's own doc for why comparing sign_count on an exact
+// usedAt tie is what closes this.
+func TestWebAuthnCredentialUpdateAfterAssertion_SameUsedAtKeepsHigherSignCount(t *testing.T) {
+	repo, householdID, memberID := newTestWebAuthnCredentialRepo(t)
+	cred := testWebAuthnCredential(memberID, []byte("credential-id-tie"), "Device")
+	if err := repo.Create(testCtx(t), householdID, cred); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	credentialID := cred.CredentialID
+
+	usedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if err := repo.UpdateAfterAssertion(testCtx(t), credentialID, 9, usedAt); err != nil {
+		t.Fatalf("UpdateAfterAssertion (higher sign count): %v", err)
+	}
+	if err := repo.UpdateAfterAssertion(testCtx(t), credentialID, 4, usedAt); err != nil {
+		t.Fatalf("UpdateAfterAssertion (lower sign count, same usedAt): %v", err)
+	}
+
+	creds, err := repo.ListByMember(testCtx(t), householdID, memberID)
+	if err != nil {
+		t.Fatalf("ListByMember: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("ListByMember returned %d credentials, want 1", len(creds))
+	}
+	if creds[0].SignCount != 9 {
+		t.Errorf("SignCount after a same-timestamp lower write = %d, want 9", creds[0].SignCount)
 	}
 }
 

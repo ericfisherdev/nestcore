@@ -143,7 +143,7 @@ func TestMFABeginEnrollment_AlreadyConfirmedRejected(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret-1")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -199,6 +199,40 @@ func TestMFABeginEnrollment_CrossHouseholdCannotTouchVictimRow(t *testing.T) {
 	}
 }
 
+// TestMFABeginEnrollment_CrossHouseholdFirstEnrollmentRejected covers
+// the OTHER branch of the tenant guard: unlike
+// TestMFABeginEnrollment_CrossHouseholdCannotTouchVictimRow above (which
+// seeds a victim row first, exercising the existingHouseholdID mismatch
+// path), this member has NO existing row at all — the INSERT branch,
+// where the household id is accepted verbatim on a fresh row (mapped
+// through mfaMemberFK) rather than checked against an existing one.
+//
+// The foreign household MUST be a real, seeded household — mirroring
+// TestWebAuthnCredentialCreate_CrossHouseholdMemberRejected's own
+// reasoning (see that test's doc): a fabricated, nonexistent household
+// id trips the table's plain household_id FK before ever reaching the
+// composite mfaMemberFK this test means to exercise, which would prove
+// nothing about tenant isolation specifically.
+func TestMFABeginEnrollment_CrossHouseholdFirstEnrollmentRejected(t *testing.T) {
+	// A single shared pool: calling newTestPool a second time would reset
+	// the schema again mid-test, wiping out whatever the first call
+	// already seeded (see NewIsolatedPool's own doc — every call resets
+	// at setup).
+	pool := newTestPool(t)
+	households, members := adapter.NewHouseholdRepository(pool), adapter.NewMemberRepository(pool)
+	victim := seedMember(t, households, members, "Victim Household", "Victim")
+	attackerHousehold := seedHousehold(t, households, "Attacker Household")
+	repo := adapter.NewMFARepository(pool)
+
+	err := repo.BeginEnrollment(testCtx(t), victim.ID, attackerHousehold.ID, []byte("attacker-supplied-secret"))
+	if !errors.Is(err, domain.ErrMemberNotFound) {
+		t.Fatalf("first-ever BeginEnrollment under a foreign household: err = %v, want ErrMemberNotFound", err)
+	}
+	if _, err := repo.GetEnrollment(testCtx(t), victim.ID); !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("no enrollment row must be created: err = %v, want ErrMFANotEnrolled", err)
+	}
+}
+
 // TestMFABeginEnrollment_ConcurrentFirstEnrollment_NoOpaqueError covers
 // the race gap in beginEnrollmentOnce's own doc: SELECT ... FOR UPDATE
 // takes no lock when zero rows match, so two callers racing a member's
@@ -240,9 +274,35 @@ func TestMFAGetEnrollment_NotEnrolled(t *testing.T) {
 }
 
 func TestMFAConfirmEnrollmentWithCodes_NotEnrolled(t *testing.T) {
-	repo, _, memberID := newTestMFARepo(t)
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); !errors.Is(err, domain.ErrMFANotEnrolled) {
+	repo, householdID, memberID := newTestMFARepo(t)
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); !errors.Is(err, domain.ErrMFANotEnrolled) {
 		t.Errorf("ConfirmEnrollmentWithCodes(never enrolled) error = %v, want ErrMFANotEnrolled", err)
+	}
+}
+
+// TestMFAConfirmEnrollmentWithCodes_CrossHouseholdRejected is the
+// tenant-isolation check for the confirm step itself: a caller supplying
+// a DIFFERENT household than the enrollment's own real one must not be
+// able to confirm it — the same guard BeginEnrollment already enforces
+// on its own write.
+func TestMFAConfirmEnrollmentWithCodes_CrossHouseholdRejected(t *testing.T) {
+	repo, victimHouseholdID, memberID := newTestMFARepo(t)
+	if err := repo.BeginEnrollment(testCtx(t), memberID, victimHouseholdID, []byte("secret")); err != nil {
+		t.Fatalf("BeginEnrollment: %v", err)
+	}
+
+	attackerHouseholdID := domain.NewHouseholdID()
+	err := repo.ConfirmEnrollmentWithCodes(testCtx(t), attackerHouseholdID, memberID, []string{"hash-1"})
+	if !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("ConfirmEnrollmentWithCodes with the wrong household: err = %v, want ErrMFANotEnrolled", err)
+	}
+
+	enrollment, err := repo.GetEnrollment(testCtx(t), memberID)
+	if err != nil {
+		t.Fatalf("GetEnrollment: %v", err)
+	}
+	if enrollment.Confirmed() {
+		t.Error("a cross-household confirm attempt must not confirm the victim's enrollment")
 	}
 }
 
@@ -256,7 +316,7 @@ func TestMFAConfirmEnrollmentWithCodes_StoresCodesAtomically(t *testing.T) {
 	}
 
 	hashes := []string{"hash-1", "hash-2", "hash-3"}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, hashes); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, hashes); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -306,11 +366,11 @@ func TestMFAConfirmEnrollmentWithCodes_ConcurrentRace_ExactlyOneWins(t *testing.
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		errs[0] = repo.ConfirmEnrollmentWithCodes(ctx, memberID, hashesA)
+		errs[0] = repo.ConfirmEnrollmentWithCodes(ctx, householdID, memberID, hashesA)
 	}()
 	go func() {
 		defer wg.Done()
-		errs[1] = repo.ConfirmEnrollmentWithCodes(ctx, memberID, hashesB)
+		errs[1] = repo.ConfirmEnrollmentWithCodes(ctx, householdID, memberID, hashesB)
 	}()
 	wg.Wait()
 
@@ -358,7 +418,7 @@ func TestMFADeleteEnrollment_CascadesRecoveryCodes(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, []string{"hash-a", "hash-b", "hash-c"}); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, []string{"hash-a", "hash-b", "hash-c"}); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -406,7 +466,7 @@ func TestMFAMarkRecoveryCodeUsed_ExcludesFromUnusedList(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, []string{"hash-1", "hash-2", "hash-3"}); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, []string{"hash-1", "hash-2", "hash-3"}); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 	codes, err := repo.ListUnusedRecoveryCodes(testCtx(t), memberID)
@@ -453,7 +513,7 @@ func TestMFAGetEnrollment_LastTOTPStepNilBeforeAnyLogin(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -471,7 +531,7 @@ func TestMFARecordLoginStep_PersistsAndIsReadableViaGetEnrollment(t *testing.T) 
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -497,7 +557,7 @@ func TestMFARecordLoginStep_RejectsEqualOrLowerStep(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 	if err := repo.RecordLoginStep(testCtx(t), memberID, 1000); err != nil {
@@ -524,7 +584,7 @@ func TestMFARecordLoginStep_AcceptsStrictlyIncreasingSteps(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 
@@ -554,7 +614,7 @@ func TestMFARecordLoginStep_ConcurrentRace_OnlyTheHigherStepWins(t *testing.T) {
 	if err := repo.BeginEnrollment(testCtx(t), memberID, householdID, []byte("secret")); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), memberID, nil); err != nil {
+	if err := repo.ConfirmEnrollmentWithCodes(testCtx(t), householdID, memberID, nil); err != nil {
 		t.Fatalf("ConfirmEnrollmentWithCodes: %v", err)
 	}
 	ctx := testCtx(t)

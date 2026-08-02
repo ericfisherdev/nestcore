@@ -64,11 +64,11 @@ func (f *fakeMFARepo) BeginEnrollment(_ context.Context, memberID domain.MemberI
 	return nil
 }
 
-func (f *fakeMFARepo) ConfirmEnrollmentWithCodes(_ context.Context, memberID domain.MemberID, hashes []string) error {
+func (f *fakeMFARepo) ConfirmEnrollmentWithCodes(_ context.Context, householdID domain.HouseholdID, memberID domain.MemberID, hashes []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e, ok := f.enrollments[memberID]
-	if !ok {
+	if !ok || e.HouseholdID != householdID {
 		return domain.ErrMFANotEnrolled
 	}
 	if e.Confirmed() {
@@ -115,6 +115,12 @@ func (f *fakeMFARepo) MarkRecoveryCodeUsed(_ context.Context, codeID domain.Reco
 	for memberID, codes := range f.codes {
 		for i := range codes {
 			if codes[i].ID == codeID {
+				if codes[i].Used() {
+					// A concurrent request already consumed this
+					// single-use code. Report it exactly as a
+					// non-matching code, per the no-oracle contract.
+					return domain.ErrRecoveryCodeInvalid
+				}
 				now := time.Now()
 				codes[i].UsedAt = &now
 				f.codes[memberID] = codes
@@ -182,7 +188,10 @@ func (f *fakeTOTPProvider) MatchStep(code, secret string) (int64, bool) {
 // ---------------------------------------------------------------------------
 
 // captureLogger returns a logger that writes to the returned buffer, so
-// tests can assert on what was and was not logged.
+// tests can assert on what was and was not logged. Safe to share with a
+// concurrent test (e.g. the racing VerifyLoginCode calls below):
+// slog.TextHandler serializes each Handle call internally, so concurrent
+// log writes never race on the underlying bytes.Buffer.
 func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
@@ -231,7 +240,7 @@ func confirmEnrollment(t *testing.T, svc *app.MFAService, memberID domain.Member
 	if _, _, err := svc.BeginEnrollment(context.Background(), memberID, householdID, "Nestcore", "Member"); err != nil {
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
-	codes, err := svc.ConfirmEnrollment(context.Background(), memberID, "123456")
+	codes, err := svc.ConfirmEnrollment(context.Background(), memberID, householdID, "123456")
 	if err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
@@ -360,7 +369,7 @@ func TestConfirmEnrollment_WrongCodeRejected_EnrollmentStaysUnconfirmed(t *testi
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
 
-	_, err := f.svc.ConfirmEnrollment(context.Background(), memberID, "000000")
+	_, err := f.svc.ConfirmEnrollment(context.Background(), memberID, householdID, "000000")
 	if !errors.Is(err, domain.ErrInvalidTOTPCode) {
 		t.Fatalf("ConfirmEnrollment(wrong code): err = %v, want ErrInvalidTOTPCode", err)
 	}
@@ -377,7 +386,7 @@ func TestConfirmEnrollment_WrongCodeRejected_EnrollmentStaysUnconfirmed(t *testi
 func TestConfirmEnrollment_NotEnrolled(t *testing.T) {
 	t.Parallel()
 	f := newMFAFixture(t)
-	_, err := f.svc.ConfirmEnrollment(context.Background(), domain.NewMemberID(), "123456")
+	_, err := f.svc.ConfirmEnrollment(context.Background(), domain.NewMemberID(), domain.NewHouseholdID(), "123456")
 	if !errors.Is(err, domain.ErrMFANotEnrolled) {
 		t.Errorf("ConfirmEnrollment with no enrollment: err = %v, want ErrMFANotEnrolled", err)
 	}
@@ -392,7 +401,7 @@ func TestConfirmEnrollment_ValidCode_ActivatesAndReturnsTenRecoveryCodes(t *test
 		t.Fatalf("BeginEnrollment: %v", err)
 	}
 
-	codes, err := f.svc.ConfirmEnrollment(context.Background(), memberID, "123456")
+	codes, err := f.svc.ConfirmEnrollment(context.Background(), memberID, householdID, "123456")
 	if err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
@@ -432,6 +441,36 @@ func TestConfirmEnrollment_ValidCode_ActivatesAndReturnsTenRecoveryCodes(t *test
 	}
 }
 
+// TestConfirmEnrollment_CrossHouseholdRejected proves the caller-supplied
+// householdID is actually checked, not merely threaded through: a
+// household different from the enrollment's own real one must be
+// rejected exactly like "not enrolled" — mirroring
+// TestBeginEnrollment_CrossHouseholdRejected's own coverage of the
+// equivalent case for BeginEnrollment.
+func TestConfirmEnrollment_CrossHouseholdRejected(t *testing.T) {
+	t.Parallel()
+	f := newMFAFixture(t)
+	memberID := domain.NewMemberID()
+	victimHousehold := domain.NewHouseholdID()
+	attackerHousehold := domain.NewHouseholdID()
+	if _, _, err := f.svc.BeginEnrollment(context.Background(), memberID, victimHousehold, "Nestcore", "Alice"); err != nil {
+		t.Fatalf("BeginEnrollment: %v", err)
+	}
+
+	_, err := f.svc.ConfirmEnrollment(context.Background(), memberID, attackerHousehold, "123456")
+	if !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("ConfirmEnrollment with the wrong household: err = %v, want ErrMFANotEnrolled", err)
+	}
+
+	enrollment, err := f.repo.GetEnrollment(context.Background(), memberID)
+	if err != nil {
+		t.Fatalf("GetEnrollment: %v", err)
+	}
+	if enrollment.Confirmed() {
+		t.Error("a cross-household confirm attempt must not confirm the victim's enrollment")
+	}
+}
+
 func TestConfirmEnrollment_AlreadyConfirmed(t *testing.T) {
 	t.Parallel()
 	f := newMFAFixture(t)
@@ -439,7 +478,7 @@ func TestConfirmEnrollment_AlreadyConfirmed(t *testing.T) {
 	householdID := domain.NewHouseholdID()
 	confirmEnrollment(t, f.svc, memberID, householdID)
 
-	if _, err := f.svc.ConfirmEnrollment(context.Background(), memberID, "123456"); !errors.Is(err, domain.ErrMFAAlreadyEnrolled) {
+	if _, err := f.svc.ConfirmEnrollment(context.Background(), memberID, householdID, "123456"); !errors.Is(err, domain.ErrMFAAlreadyEnrolled) {
 		t.Errorf("re-confirming an already-confirmed enrollment: err = %v, want ErrMFAAlreadyEnrolled", err)
 	}
 }
@@ -458,7 +497,7 @@ func TestBeginEnrollment_SecretNeverLogged(t *testing.T) {
 		t.Errorf("BeginEnrollment logged the raw secret: %s", f.logs.String())
 	}
 
-	if _, err := f.svc.ConfirmEnrollment(context.Background(), memberID, "123456"); err != nil {
+	if _, err := f.svc.ConfirmEnrollment(context.Background(), memberID, householdID, "123456"); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 	if strings.Contains(f.logs.String(), secret) {
@@ -578,6 +617,37 @@ func TestDisenroll_UnconfirmedEnrollment_NotEnrolled(t *testing.T) {
 	err := f.svc.Disenroll(context.Background(), memberID, householdID, "123456", "")
 	if !errors.Is(err, domain.ErrMFANotEnrolled) {
 		t.Errorf("Disenroll against an unconfirmed enrollment: err = %v, want ErrMFANotEnrolled", err)
+	}
+}
+
+// TestDisenroll_CrossHouseholdRejected pins the tenant scoping of the
+// delete: a caller that supplies a valid credential but the WRONG
+// householdID must not remove the enrollment. verifyTOTPOrRecovery
+// resolves the enrollment by memberID alone, so the household check
+// lives entirely in DeleteEnrollment — this is fail-closed today, and
+// this test keeps it so.
+func TestDisenroll_CrossHouseholdRejected(t *testing.T) {
+	t.Parallel()
+	f := newMFAFixture(t)
+	memberID := domain.NewMemberID()
+	victimHousehold := domain.NewHouseholdID()
+	attackerHousehold := domain.NewHouseholdID()
+	confirmEnrollment(t, f.svc, memberID, victimHousehold)
+
+	err := f.svc.Disenroll(context.Background(), memberID, attackerHousehold, "123456", "")
+	if !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("cross-household Disenroll: err = %v, want ErrMFANotEnrolled", err)
+	}
+
+	if _, err := f.repo.GetEnrollment(context.Background(), memberID); err != nil {
+		t.Errorf("a cross-household Disenroll must leave the victim's enrollment intact: %v", err)
+	}
+	unused, err := f.repo.ListUnusedRecoveryCodes(context.Background(), memberID)
+	if err != nil {
+		t.Fatalf("ListUnusedRecoveryCodes: %v", err)
+	}
+	if len(unused) != 10 {
+		t.Errorf("recovery codes after a cross-household Disenroll = %d, want still 10", len(unused))
 	}
 }
 
@@ -753,6 +823,47 @@ func TestVerifyLoginCode_ConcurrentReplay_ExactlyOneWins(t *testing.T) {
 	}
 }
 
+// TestVerifyLoginCode_ConcurrentRecoveryCode_ExactlyOneWins mirrors
+// TestVerifyLoginCode_ConcurrentReplay_ExactlyOneWins for the
+// recovery-code path: a single-use code must authorize exactly one login
+// even when two requests submit it simultaneously. Both goroutines read
+// the same unused code from ListUnusedRecoveryCodes before either
+// consume lands, so only MarkRecoveryCodeUsed's conditional write can
+// reject the loser.
+func TestVerifyLoginCode_ConcurrentRecoveryCode_ExactlyOneWins(t *testing.T) {
+	t.Parallel()
+	f := newMFAFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	codes := confirmEnrollment(t, f.svc, memberID, householdID)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := range errs {
+		go func() {
+			defer wg.Done()
+			errs[i] = f.svc.VerifyLoginCode(context.Background(), memberID, "", codes[4])
+		}()
+	}
+	wg.Wait()
+
+	successes := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, domain.ErrRecoveryCodeInvalid):
+			// Expected outcome for the loser.
+		default:
+			t.Errorf("racing VerifyLoginCode call %d: unexpected error %v (want nil or ErrRecoveryCodeInvalid)", i, err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("racing VerifyLoginCode with the identical recovery code: %d succeeded, want exactly 1", successes)
+	}
+}
+
 func TestVerifyLoginCode_RecoveryCode_ConsumesIt(t *testing.T) {
 	t.Parallel()
 	f := newMFAFixture(t)
@@ -858,6 +969,8 @@ func TestVerifyLoginCode_UnenrolledMemberRejected(t *testing.T) {
 // the GCM authentication tag no longer matches.
 func corruptStoredSecret(t *testing.T, repo *fakeMFARepo, memberID domain.MemberID) {
 	t.Helper()
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
 	e, ok := repo.enrollments[memberID]
 	if !ok {
 		t.Fatalf("corruptStoredSecret: no enrollment on file for %s", memberID)
@@ -917,7 +1030,7 @@ func TestConfirmEnrollment_DecryptsFixtureSealedWithMatchingAESGCMParameters(t *
 		t.Fatalf("NewMFAService: %v", err)
 	}
 
-	codes, err := svc.ConfirmEnrollment(context.Background(), memberID, "123456")
+	codes, err := svc.ConfirmEnrollment(context.Background(), memberID, householdID, "123456")
 	if err != nil {
 		t.Fatalf("ConfirmEnrollment against a fixture-sealed secret: %v", err)
 	}

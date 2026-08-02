@@ -80,7 +80,11 @@ type WebAuthnCredential struct {
 //
 // Error contracts:
 //   - ListByMember never returns ErrWebAuthnCredentialNotFound for a
-//     member with no credentials — it returns an empty slice.
+//     member with no credentials — it returns an empty slice. Scoped to
+//     BOTH memberID and householdID, mirroring Rename/Delete's own
+//     defense-in-depth tenant check: a memberID belonging to a DIFFERENT
+//     household than householdID must return an empty slice, never that
+//     other household's credentials.
 //   - Create returns ErrHouseholdNotFound when householdID does not
 //     exist, ErrMemberNotFound when cred.MemberID does not belong to
 //     householdID (FK violations), and ErrWebAuthnCredentialExists when
@@ -108,9 +112,9 @@ type WebAuthnCredential struct {
 //     write (a concurrent, more recently issued assertion already
 //     recorded fresher state), this returns nil, not an error.
 type WebAuthnCredentialRepository interface {
-	// ListByMember returns every credential registered by memberID,
-	// oldest first.
-	ListByMember(ctx context.Context, memberID MemberID) ([]WebAuthnCredential, error)
+	// ListByMember returns every credential registered by memberID within
+	// householdID, oldest first.
+	ListByMember(ctx context.Context, householdID HouseholdID, memberID MemberID) ([]WebAuthnCredential, error)
 
 	// Create persists a newly registered credential. The caller supplies
 	// a fully populated WebAuthnCredential (ID already assigned via
