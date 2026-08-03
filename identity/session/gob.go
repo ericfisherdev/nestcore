@@ -20,6 +20,15 @@ import (
 // in the one package both apps already import to build their manager,
 // keeps that guarantee in one place instead of requiring Nestorage to import
 // go-webauthn solely for this side effect.
+//
+// CONSEQUENCE FOR CHANGES: this list is a cross-repo contract, not a local
+// detail. Putting a NEW concrete type into either app's session requires
+// registering it HERE first, releasing nestcore, and having BOTH apps adopt
+// that version BEFORE either one writes the type. Writing it from one app
+// while the other still lacks the registration does not degrade gracefully
+// — the other app's session Load fails for every key, not just the new one,
+// which reads as a logged-out user rather than an error anyone will trace
+// back to gob.
 func init() {
 	gob.Register(time.Time{})
 	gob.Register(webauthn.SessionData{})
