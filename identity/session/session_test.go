@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ericfisherdev/nestcore/config"
@@ -112,6 +113,77 @@ func TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother(t *testing.T)
 	got := smB.GetString(otherSessCtx, session.KeyMemberID)
 	if got != "cross-instance-test-member" {
 		t.Errorf("value read via the second instance = %q, want %q (SSO requires the store, not just the manager, to carry session data)", got, "cross-instance-test-member")
+	}
+}
+
+// TestNewManager_SessionWithNestovaGobTypesDecodesThroughOtherInstance is
+// the NSTR-117 gob-compatibility proof. Nestova and Nestorage are separate
+// Go modules, so a literal "both apps in one test" round trip is not
+// possible — this proves the property one layer down, at the shared
+// primitive both apps' managers are built from: a session carrying the
+// EXACT concrete types Nestova puts into it (a time.Time under
+// mfa_verified_at, a webauthn.SessionData under a WebAuthn challenge key)
+// must decode cleanly through a SECOND, independently-constructed manager
+// that never itself puts those types — modeling Nestorage loading a session
+// Nestova also wrote to. scs's GobCodec decodes the whole session value map
+// in one gob.Decode call (see codec.go), so a single unregistered type
+// anywhere in the blob fails the ENTIRE load, not just that key — which is
+// exactly what identity/session's gob.go init() registers both types
+// against, in the one package both apps import, so neither app needs its
+// own copy of this registration to stay compatible with the other.
+func TestNewManager_SessionWithNestovaGobTypesDecodesThroughOtherInstance(t *testing.T) {
+	poolA := harness.NewIsolatedPool(t, "session")
+	dsn := harness.DSN(t, "session")
+
+	poolB, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect second pool: %v", err)
+	}
+	t.Cleanup(poolB.Close)
+
+	cfg := config.SessionConfig{Secure: false, Lifetime: time.Hour}
+	smA, stopA := session.NewManager(poolA, cfg)
+	t.Cleanup(stopA)
+	smB, stopB := session.NewManager(poolB, cfg)
+	t.Cleanup(stopB)
+
+	ctx := testCtx(t)
+
+	// "Nestova's" request: put the same key/type shapes Nestova's own
+	// internal/auth/adapter puts — a plain string member id, a time.Time
+	// (mfa_verified_at), and a webauthn.SessionData (a registration
+	// challenge) — then commit.
+	sessCtx, err := smA.Load(ctx, "")
+	if err != nil {
+		t.Fatalf("smA.Load (new session): %v", err)
+	}
+	smA.Put(sessCtx, session.KeyMemberID, "cross-app-gob-test-member")
+	verifiedAt := time.Now().UTC().Truncate(time.Second)
+	smA.Put(sessCtx, "mfa_verified_at", verifiedAt)
+	challenge := webauthn.SessionData{
+		Challenge: "test-challenge",
+		UserID:    []byte("test-user-id"),
+	}
+	smA.Put(sessCtx, "webauthn_reg_challenge", challenge)
+	token, _, err := smA.Commit(sessCtx)
+	if err != nil {
+		t.Fatalf("smA.Commit: %v", err)
+	}
+
+	// "Nestorage's" request: the SAME token, loaded through a completely
+	// independent manager that never itself puts a time.Time or
+	// webauthn.SessionData. If gob.Register for either type were missing
+	// from a process resolving this session, this Load call fails outright
+	// — the whole blob, not just the two keys this instance never wrote.
+	otherSessCtx, err := smB.Load(ctx, token)
+	if err != nil {
+		t.Fatalf("smB.Load (session carrying Nestova's gob types): %v", err)
+	}
+	if got := smB.GetString(otherSessCtx, session.KeyMemberID); got != "cross-app-gob-test-member" {
+		t.Errorf("member id read via the second instance = %q, want %q", got, "cross-app-gob-test-member")
+	}
+	if got := smB.GetTime(otherSessCtx, "mfa_verified_at"); !got.Equal(verifiedAt) {
+		t.Errorf("mfa_verified_at read via the second instance = %v, want %v", got, verifiedAt)
 	}
 }
 
