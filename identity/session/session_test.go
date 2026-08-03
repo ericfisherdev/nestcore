@@ -53,6 +53,17 @@ func testCtx(t *testing.T) context.Context {
 	return ctx
 }
 
+// TestKeyMemberID_MatchesDocumentedLiteral pins KeyMemberID's value directly
+// against the literal "member_id" the package doc promises both apps use.
+// Without this, a rename of the constant would move the writer and reader in
+// TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother together and
+// stay green, hiding a break with any caller still on the documented literal.
+func TestKeyMemberID_MatchesDocumentedLiteral(t *testing.T) {
+	if session.KeyMemberID != "member_id" {
+		t.Errorf("session.KeyMemberID = %q, want %q", session.KeyMemberID, "member_id")
+	}
+}
+
 // TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother is the SSO
 // gated proof (AC: "a session written through one SessionManager instance
 // is readable through a second instance on a separate pool"): it builds
