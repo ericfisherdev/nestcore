@@ -86,7 +86,7 @@ func TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother(t *testing.T)
 	if err != nil {
 		t.Fatalf("smA.Load (new session): %v", err)
 	}
-	smA.Put(sessCtx, "member_id", "cross-instance-test-member")
+	smA.Put(sessCtx, session.KeyMemberID, "cross-instance-test-member")
 	token, _, err := smA.Commit(sessCtx)
 	if err != nil {
 		t.Fatalf("smA.Commit: %v", err)
@@ -98,7 +98,7 @@ func TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother(t *testing.T)
 	if err != nil {
 		t.Fatalf("smB.Load: %v", err)
 	}
-	got := smB.GetString(otherSessCtx, "member_id")
+	got := smB.GetString(otherSessCtx, session.KeyMemberID)
 	if got != "cross-instance-test-member" {
 		t.Errorf("value read via the second instance = %q, want %q (SSO requires the store, not just the manager, to carry session data)", got, "cross-instance-test-member")
 	}
