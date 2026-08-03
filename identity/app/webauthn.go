@@ -23,6 +23,17 @@ import (
 // registration on an authenticator that cannot.
 const webauthnRegistrationResidentKey = protocol.ResidentKeyRequirementPreferred
 
+// webauthnUserVerification is required, not merely go-webauthn's
+// "preferred" default, on BOTH ceremonies: a usernameless passkey login
+// is the SOLE authentication factor (no password precedes it — see
+// BeginLogin's own doc), so without this an authenticator may satisfy
+// the ceremony on possession alone (user PRESENT, but never actually
+// verified via PIN/biometric). Registration requires it too, or a member
+// could register a credential on an authenticator that cannot perform
+// UV and then be permanently unable to satisfy the login requirement
+// with it.
+const webauthnUserVerification = protocol.VerificationRequired
+
 // defaultCredentialNickname is used when a member submits a blank
 // nickname.
 const defaultCredentialNickname = "Passkey"
@@ -108,8 +119,18 @@ func (s *WebAuthnService) BeginRegistration(ctx context.Context, householdID dom
 	}
 	user := s.newUser(memberID, displayName, existing)
 
+	// Both settings must go through a single WithAuthenticatorSelection
+	// call: unlike WithResidentKeyRequirement (which mutates individual
+	// fields), WithAuthenticatorSelection REPLACES the whole
+	// AuthenticatorSelection struct — combining it with
+	// WithResidentKeyRequirement would make the outcome depend on
+	// argument order, silently dropping whichever setting applied first.
 	creation, session, err := s.wa.BeginRegistration(user,
-		webauthn.WithResidentKeyRequirement(webauthnRegistrationResidentKey),
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			ResidentKey:        webauthnRegistrationResidentKey,
+			RequireResidentKey: protocol.ResidentKeyNotRequired(),
+			UserVerification:   webauthnUserVerification,
+		}),
 		webauthn.WithExclusions(webauthn.Credentials(user.WebAuthnCredentials()).CredentialDescriptors()),
 	)
 	if err != nil {
@@ -194,7 +215,12 @@ func (s *WebAuthnService) Revoke(ctx context.Context, householdID domain.Househo
 // until FinishLogin, and discard it afterward regardless of outcome,
 // mirroring BeginRegistration's single-use challenge contract.
 func (s *WebAuthnService) BeginLogin(_ context.Context) (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
-	assertion, session, err := s.wa.BeginDiscoverableLogin()
+	// go-webauthn's own default is "preferred" (do not fail if UV is
+	// absent), which is not adequate for a ceremony that is the SOLE
+	// authentication factor — see webauthnUserVerification's own doc.
+	assertion, session, err := s.wa.BeginDiscoverableLogin(
+		webauthn.WithUserVerification(webauthnUserVerification),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("webauthn: begin login: %w", err)
 	}
