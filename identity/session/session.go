@@ -40,6 +40,15 @@ import (
 	"github.com/ericfisherdev/nestcore/config"
 )
 
+// KeyMemberID is the session DATA key both apps MUST use to store the
+// authenticated identity.member's id. This is the second half of the
+// cookie-name contract above: sharing one cookie and one store is not
+// enough for SSO if each app reads back a different key than the other
+// wrote — a session resolvable by App A but silently anonymous in App B.
+// Both apps put/get the member id under this exact key rather than a
+// private literal of their own (NSTR-117).
+const KeyMemberID = "member_id"
+
 // sessionsTable schema-qualifies the pgxstore table, matching
 // identity/adapter's own convention of never relying on search_path
 // resolution (see identity/adapter's package doc) — pgxstore
