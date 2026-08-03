@@ -25,10 +25,18 @@ var (
 
 // NewMemberRepository constructs the repository with an injected query
 // executor. See HouseholdRepository's constructor doc for why the
-// executor is a db.TX rather than a concrete pool type.
+// executor is a db.TX rather than a concrete pool type. Panics if dbtx
+// cannot also begin a transaction (memberTxBeginner) — UpdateMemberProfile
+// and SetMemberActive both need one, mirroring MFARepository's
+// mfaTxBeginner requirement (mfa_postgres.go) for the same reason:
+// failing here at construction is far more convenient than the first
+// time a caller renames or deactivates a member.
 func NewMemberRepository(dbtx db.TX) *MemberRepository {
 	if dbtx == nil {
 		panic("adapter: NewMemberRepository requires a non-nil db.TX")
+	}
+	if _, ok := dbtx.(memberTxBeginner); !ok {
+		panic("adapter: NewMemberRepository requires a db.TX that can also begin transactions (memberTxBeginner)")
 	}
 	return &MemberRepository{dbtx: dbtx}
 }
@@ -102,49 +110,55 @@ func (r *MemberRepository) ListMembers(ctx context.Context, householdID domain.H
 	return members, nil
 }
 
-// householdWriteLockSQL is a CTE, prefixed onto UpdateMemberProfile's and
-// SetMemberActive's guarded UPDATE, that takes a household-scoped
-// transaction-duration advisory lock before the UPDATE touches any row.
-// The enclosing statement's "FROM household_lock" (with no join condition,
-// against this single-row CTE) is what forces Postgres to actually
-// evaluate it rather than treat it as dead code: an unreferenced CTE has
-// no such guarantee, but joining a one-row relation into the UPDATE's own
-// FROM leaves its row set unchanged while still requiring the CTE to run
-// first.
+// memberTxBeginner is the slice of a pgx executor UpdateMemberProfile and
+// SetMemberActive need to open their own transaction, mirroring
+// mfaTxBeginner (mfa_postgres.go) — satisfied by both *pgxpool.Pool and
+// pgx.Tx.
 //
-// This lock is what makes the last-active-owner guard (below) race-safe
-// rather than a check-then-write, AND why the guard's own EXISTS subquery
-// needs no locking of its own: earlier revisions of this guard used a
-// correlated "FOR UPDATE" on the candidate "other owner" rows instead, but
-// that deadlocks under concurrency — demoting owner A takes A's row lock
-// (as the UPDATE's own target) and then wants a FOR UPDATE lock on B (as
-// a candidate "other" owner), while a concurrent demotion of B takes B's
-// row lock and wants a lock on A: two transactions each holding what the
-// other wants, in reverse order, is a textbook deadlock, and Postgres
-// aborts one of them with a 40P01 error rather than serializing them.
-// Serializing on ONE advisory lock per household up front instead means
-// the second transaction blocks before taking any row lock at all, so the
-// two can never hold conflicting locks in opposite orders.
-//
-// hashtext's 32-bit range makes a false collision between two different
-// households' lock keys possible in principle; the only cost of one is a
-// spurious moment of extra serialization between two unrelated
-// households' guarded mutations, never an incorrect result.
-const householdWriteLockSQL = `
-	WITH household_lock AS (
-		SELECT pg_advisory_xact_lock(hashtext($2)) AS locked
-	)`
+// The household advisory lock these two methods take MUST be acquired as
+// its OWN statement, strictly before the guarded UPDATE, rather than
+// alongside it (an earlier revision used a CTE joined into the same
+// statement — see this type's git history for why that was wrong). Under
+// READ COMMITTED, a statement's MVCC snapshot is fixed the moment that
+// statement BEGINS executing, not when it finishes: a lock acquired
+// inside the SAME statement as the guarded UPDATE still leaves the
+// UPDATE's guard reading the snapshot taken before the wait, so it can
+// miss whatever the previous lock holder just committed — the lock then
+// only serializes execution, not visibility. Acquiring the lock as a
+// prior statement in the same transaction fixes this: the guarded
+// UPDATE's own statement doesn't begin (and so doesn't take its snapshot)
+// until AFTER the lock is granted, and a lock can only be granted once
+// its previous holder has committed and released it — so the fresh
+// snapshot the guarded UPDATE takes is guaranteed to include that commit.
+type memberTxBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+// lockHousehold acquires the household-scoped, transaction-duration
+// advisory lock documented on memberTxBeginner, as its own statement on
+// tx. hashtext's 32-bit range makes a false collision between two
+// different households' lock keys possible in principle; the only cost
+// of one is a spurious moment of extra serialization between two
+// unrelated households' guarded mutations, never an incorrect result.
+func lockHousehold(ctx context.Context, tx pgx.Tx, householdID domain.HouseholdID) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, householdID.String()); err != nil {
+		return fmt.Errorf("lock household: %w", err)
+	}
+	return nil
+}
 
 // lastActiveOwnerGuardSQL is the fragment shared by UpdateMemberProfile and
 // SetMemberActive: it evaluates to true exactly when the pending change
 // would demote or deactivate the household's sole active owner, in which
 // case the enclosing UPDATE's WHERE clause must reject the row. Every
-// query embedding it, together with householdWriteLockSQL, must bind $1
-// to the member id and $2 to the household id.
+// query embedding it must bind $1 to the member id and $2 to the
+// household id, and must run AFTER lockHousehold on the same transaction
+// (see memberTxBeginner's doc for why the ordering, not just the lock's
+// existence, is what makes this race-safe).
 const lastActiveOwnerGuardSQL = `
 	NOT EXISTS (
 		SELECT 1 FROM identity.member other
-		 WHERE other.household_id = $2::uuid AND other.id <> $1
+		 WHERE other.household_id = $2 AND other.id <> $1
 		   AND other.role = 'owner' AND other.active
 	)`
 
@@ -154,15 +168,28 @@ func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID 
 	if !role.Valid() {
 		return fmt.Errorf("adapter: update member profile: invalid role %q", role)
 	}
-	q := householdWriteLockSQL + `
+	beginner, ok := r.dbtx.(memberTxBeginner)
+	if !ok {
+		return errors.New("update member profile: executor does not support transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("update member profile: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockHousehold(ctx, tx, householdID); err != nil {
+		return fmt.Errorf("update member profile: %w", err)
+	}
+
+	const q = `
 		UPDATE identity.member AS m
 		   SET display_name = $3, role = $4, updated_at = now()
-		  FROM household_lock
-		 WHERE m.id = $1 AND m.household_id = $2::uuid
+		 WHERE m.id = $1 AND m.household_id = $2
 		   AND NOT (
 		         m.role = 'owner' AND m.active AND $4 <> 'owner' AND ` + lastActiveOwnerGuardSQL + `
 		   )`
-	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), displayName, role.String())
+	tag, err := tx.Exec(ctx, q, id.String(), householdID.String(), displayName, role.String())
 	if err != nil {
 		if isConstraintViolation(err, uniqueViolation, memberHouseholdNameUniq) {
 			return domain.ErrDuplicateMember
@@ -170,7 +197,10 @@ func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID 
 		return fmt.Errorf("update member profile: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.memberWriteFailureReason(ctx, householdID, id)
+		return memberWriteFailureReason(ctx, tx, householdID, id)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("update member profile: commit: %w", err)
 	}
 	return nil
 }
@@ -181,20 +211,36 @@ func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID 
 // "$3 = false" clause is false in that case, so the surrounding NOT(...)
 // is unconditionally true and the row updates.
 func (r *MemberRepository) SetMemberActive(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID, active bool) error {
-	q := householdWriteLockSQL + `
+	beginner, ok := r.dbtx.(memberTxBeginner)
+	if !ok {
+		return errors.New("set member active: executor does not support transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set member active: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockHousehold(ctx, tx, householdID); err != nil {
+		return fmt.Errorf("set member active: %w", err)
+	}
+
+	const q = `
 		UPDATE identity.member AS m
 		   SET active = $3, updated_at = now()
-		  FROM household_lock
-		 WHERE m.id = $1 AND m.household_id = $2::uuid
+		 WHERE m.id = $1 AND m.household_id = $2
 		   AND NOT (
 		         $3 = false AND m.role = 'owner' AND m.active AND ` + lastActiveOwnerGuardSQL + `
 		   )`
-	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), active)
+	tag, err := tx.Exec(ctx, q, id.String(), householdID.String(), active)
 	if err != nil {
 		return fmt.Errorf("set member active: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return r.memberWriteFailureReason(ctx, householdID, id)
+		return memberWriteFailureReason(ctx, tx, householdID, id)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("set member active: commit: %w", err)
 	}
 	return nil
 }
@@ -204,11 +250,14 @@ func (r *MemberRepository) SetMemberActive(ctx context.Context, householdID doma
 // exist in householdID (ErrMemberNotFound) or the last-active-owner guard
 // rejected the change (ErrLastActiveOwner). Members are never deleted
 // (identity/migrate's package doc: deactivation, not deletion), so this
-// existence check cannot itself race the UPDATE it is explaining.
-func (r *MemberRepository) memberWriteFailureReason(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID) error {
+// existence check cannot itself race the UPDATE it is explaining. Runs on
+// the SAME transaction as the guarded UPDATE it diagnoses, which the
+// caller rolls back regardless (via its deferred Rollback) since this
+// always returns a non-nil error.
+func memberWriteFailureReason(ctx context.Context, tx pgx.Tx, householdID domain.HouseholdID, id domain.MemberID) error {
 	const q = `SELECT 1 FROM identity.member WHERE id = $1 AND household_id = $2`
 	var exists int
-	err := r.dbtx.QueryRow(ctx, q, id.String(), householdID.String()).Scan(&exists)
+	err := tx.QueryRow(ctx, q, id.String(), householdID.String()).Scan(&exists)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.ErrMemberNotFound
