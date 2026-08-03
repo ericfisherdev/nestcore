@@ -39,6 +39,15 @@ type totpProvider interface {
 // completing the identity package (NSTR-130); the app-level enrollment
 // UI, and any owner-administered reset flow, are composed on top of this
 // service by each app, not implemented here.
+//
+// Attempt throttling is also out of scope here, the same way it is for
+// Authenticator's password login: this service answers an unbounded
+// number of TOTP guesses, and a wrong recovery code costs up to
+// recoveryCodeCount argon2id verifications per attempt (see
+// matchRecoveryCode's own doc). RFC 6238 §5.2 makes throttling a
+// requirement, not an optimization — the composing app's HTTP layer is
+// the only place with the request-rate visibility to enforce it, and
+// must not assume this package does.
 type MFAService struct {
 	repo   domain.MFARepository
 	cipher secretCipher
