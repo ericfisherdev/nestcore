@@ -76,6 +76,11 @@ var (
 	// ErrDuplicateMember is returned when adding a member whose display
 	// name already exists (case-insensitively) within the household.
 	ErrDuplicateMember = errors.New("identity: duplicate member display name in household")
+	// ErrLastActiveOwner is returned by MemberWriter when a role change or
+	// deactivation would leave a household with no active owner. It is
+	// never returned for reactivation — reactivating only ever adds an
+	// active owner back, so it cannot violate this invariant.
+	ErrLastActiveOwner = errors.New("identity: household must keep at least one active owner")
 )
 
 // MemberRepository persists members and looks them up. It depends only on
@@ -100,4 +105,31 @@ type MemberRepository interface {
 	CreateMember(ctx context.Context, m *Member) error
 	GetMember(ctx context.Context, id MemberID) (*Member, error)
 	ListMembers(ctx context.Context, householdID HouseholdID) ([]*Member, error)
+}
+
+// MemberWriter is the outbound port for the member lifecycle mutations
+// (NSTR-111): rename, role change, deactivate, and reactivate. It is kept
+// separate from MemberRepository (ISP) so the existing read-side fakes
+// this package's consumers already have keep compiling unchanged — they
+// were never asked to implement writes.
+//
+// Both methods scope by (householdID, id) together, not id alone: a
+// mismatched pair (an id that exists but belongs to a different household)
+// is indistinguishable from an unknown id, exactly like MemberRepository's
+// own GetMember would behave if it were household-scoped.
+//
+// Error contracts:
+//   - UpdateMemberProfile returns ErrMemberNotFound when id does not exist
+//     in householdID, ErrDuplicateMember when displayName collides
+//     case-insensitively with another member in the household, and
+//     ErrLastActiveOwner when the role change would leave the household
+//     with no active owner (i.e. id is currently the household's sole
+//     active owner and role is not RoleOwner).
+//   - SetMemberActive returns ErrMemberNotFound when id does not exist in
+//     householdID, and ErrLastActiveOwner when active is false and id is
+//     the household's sole active owner. Reactivation (active true) is
+//     never refused by the guard.
+type MemberWriter interface {
+	UpdateMemberProfile(ctx context.Context, householdID HouseholdID, id MemberID, displayName string, role Role) error
+	SetMemberActive(ctx context.Context, householdID HouseholdID, id MemberID, active bool) error
 }
