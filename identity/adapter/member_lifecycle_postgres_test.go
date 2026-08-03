@@ -303,13 +303,24 @@ func TestUpdateMemberProfileInvalidRole(t *testing.T) {
 
 // TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock
 // deactivates the household's two owners at the same time, from two
-// goroutines racing against the same pool. The household-scoped advisory
-// lock each guarded UPDATE takes (see householdWriteLockSQL) must
-// serialize the two rather than let them cross-lock each other's target
-// row: exactly one succeeds and the other is refused with
-// ErrLastActiveOwner — a real Postgres deadlock (SQLSTATE 40P01) would
-// instead surface as a third, distinct wrapped error on whichever side
-// lost Postgres's deadlock detector's coin flip.
+// goroutines racing against the same pool, released together through a
+// barrier so their two guarded UPDATEs are actually in flight
+// simultaneously rather than ordered by goroutine-startup jitter (without
+// it, one call typically completes and commits well before the other
+// even begins, and the assertions below would hold for reasons unrelated
+// to the guard's own serialization).
+//
+// The household-scoped advisory lock each guarded UPDATE takes (see
+// memberTxBeginner's doc) must serialize the two rather than let them
+// cross-lock each other's target row, AND must give the second one a
+// fresh-enough snapshot to see the first's commit: exactly one succeeds
+// and the other is refused with ErrLastActiveOwner, and — checked
+// directly against the stored rows, not just inferred from the returned
+// errors — the household has exactly one active owner left afterward. A
+// real Postgres deadlock (SQLSTATE 40P01) would instead surface as a
+// third, distinct wrapped error on whichever side lost Postgres's
+// deadlock detector's coin flip; a stale-snapshot visibility gap would
+// instead let both succeed, leaving zero active owners.
 func TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock(t *testing.T) {
 	households, members := newMemberTestRepos(t)
 	h := seedHousehold(t, households, "Concurrent Deactivation Household")
@@ -318,15 +329,19 @@ func TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock(t *testi
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
+	start := make(chan struct{})
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		<-start
 		errs[0] = members.SetMemberActive(testCtx(t), h.ID, ownerA.ID, false)
 	}()
 	go func() {
 		defer wg.Done()
+		<-start
 		errs[1] = members.SetMemberActive(testCtx(t), h.ID, ownerB.ID, false)
 	}()
+	close(start)
 	wg.Wait()
 
 	var succeeded, refused int
@@ -342,5 +357,19 @@ func TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock(t *testi
 	}
 	if succeeded != 1 || refused != 1 {
 		t.Errorf("concurrent SetMemberActive: succeeded=%d refused=%d, want exactly 1 of each", succeeded, refused)
+	}
+
+	all, err := members.ListMembers(testCtx(t), h.ID)
+	if err != nil {
+		t.Fatalf("ListMembers: %v", err)
+	}
+	activeOwners := 0
+	for _, m := range all {
+		if m.Role == domain.RoleOwner && m.Active {
+			activeOwners++
+		}
+	}
+	if activeOwners != 1 {
+		t.Errorf("active owners after concurrent deactivation = %d, want exactly 1", activeOwners)
 	}
 }
