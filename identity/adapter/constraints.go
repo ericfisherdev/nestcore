@@ -30,6 +30,13 @@ const (
 	// migrate's 00002 migration); a violation means memberID does not
 	// belong to householdID.
 	mfaMemberFK = "member_mfa_member_fk"
+	// mfaHouseholdFK is the auto-named FK member_mfa.household_id ->
+	// household.id (identity/migrate's 00002 migration leaves it
+	// unnamed), mirroring webauthnCredentialHouseholdFK. A violation
+	// means householdID itself does not exist at all — distinct from
+	// mfaMemberFK, but both are mapped to the SAME sentinel (see
+	// BeginEnrollment's own doc for why).
+	mfaHouseholdFK = "member_mfa_household_id_fkey"
 	// mfaMemberPK is member_mfa's primary key (member_id). BeginEnrollment
 	// can race it: SELECT ... FOR UPDATE takes no lock on a row that does
 	// not exist yet, so two concurrent first-time enrollments for the

@@ -151,7 +151,13 @@ func (r *MFARepository) beginEnrollmentOnce(ctx context.Context, memberID domain
 			VALUES ($1, $2, $3, NULL)`
 		if _, err := tx.Exec(ctx, insert, memberID.String(), householdID.String(), secretEnc); err != nil {
 			switch {
-			case isConstraintViolation(err, foreignKeyViolation, mfaMemberFK):
+			case isConstraintViolation(err, foreignKeyViolation, mfaMemberFK),
+				isConstraintViolation(err, foreignKeyViolation, mfaHouseholdFK):
+				// Both member_mfa's composite tenant FK and its plain
+				// household_id FK map to the SAME sentinel — see
+				// BeginEnrollment's own doc for why a genuinely unknown
+				// household is not distinguished from an unknown member
+				// here.
 				return domain.ErrMemberNotFound
 			case isConstraintViolation(err, uniqueViolation, mfaMemberPK):
 				return errMFAEnrollmentRaced

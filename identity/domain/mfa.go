@@ -84,12 +84,12 @@ func (c RecoveryCode) Used() bool {
 //     replacing any existing unconfirmed row in place. It returns
 //     ErrMFAAlreadyEnrolled when the existing row is already CONFIRMED
 //     (the caller must disable/disenroll first), and ErrMemberNotFound
-//     both when memberID does not belong to householdID (no such row
-//     exists yet) AND when an existing row belongs to a DIFFERENT
-//     household than householdID (a tenant-consistency guard:
-//     implementations must never touch another household's row, and must
-//     report both cases identically so neither leaks which one
-//     occurred).
+//     when memberID does not belong to householdID (no such row exists
+//     yet), when an existing row belongs to a DIFFERENT household than
+//     householdID (a tenant-consistency guard: implementations must
+//     never touch another household's row), AND when householdID itself
+//     does not exist at all — all three reported identically as
+//     ErrMemberNotFound so neither leaks which one occurred.
 //   - ConfirmEnrollmentWithCodes atomically, in a single transaction,
 //     sets confirmed_at = now on the member's existing unconfirmed row
 //     AND replaces their recovery codes with one fresh row per hash —

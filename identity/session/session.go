@@ -76,12 +76,23 @@ const cleanupInterval = 5 * time.Minute
 // set this identically, or a session written by one is unreadable by
 // the other — the same failure mode the cookie-name contract above
 // warns about.
-func NewManager(pool *pgxpool.Pool, cfg config.SessionConfig) *scs.SessionManager {
-	sm := scs.New()
-	sm.Store = pgxstore.NewWithConfig(pool, pgxstore.Config{
+//
+// The returned stop func terminates pgxstore's background cleanup
+// goroutine (started because CleanUpInterval above is non-zero).
+// Long-running apps can safely ignore it — the goroutine is meant to
+// run for the process lifetime. Any SHORT-LIVED caller (tests, above
+// all) MUST call it once the manager is no longer needed: pgxstore's own
+// docs single out exactly this case, since an uncalled stop leaves the
+// goroutine running forever on a timer, sweeping a pool the caller may
+// have already closed.
+func NewManager(pool *pgxpool.Pool, cfg config.SessionConfig) (sm *scs.SessionManager, stop func()) {
+	store := pgxstore.NewWithConfig(pool, pgxstore.Config{
 		TableName:       sessionsTable,
 		CleanUpInterval: cleanupInterval,
 	})
+
+	sm = scs.New()
+	sm.Store = store
 	sm.Lifetime = cfg.Lifetime
 	sm.IdleTimeout = cfg.Lifetime / 2
 	sm.HashTokenInStore = true
@@ -90,5 +101,5 @@ func NewManager(pool *pgxpool.Pool, cfg config.SessionConfig) *scs.SessionManage
 	sm.Cookie.Secure = cfg.Secure
 	sm.Cookie.Path = "/"
 	sm.Cookie.Persist = true
-	return sm
+	return sm, store.StopCleanup
 }

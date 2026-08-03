@@ -168,6 +168,25 @@ func TestMFABeginEnrollment_UnknownMemberInHousehold(t *testing.T) {
 	}
 }
 
+// TestMFABeginEnrollment_UnknownHouseholdRejected covers the OTHER half
+// of member_mfa's dual FK (mfaHouseholdFK, mirroring
+// webauthn_postgres_test.go's own unknown-household case): a real
+// member, but a householdID that does not exist AT ALL, must still map
+// to a domain sentinel rather than an opaque wrapped driver error — see
+// BeginEnrollment's own doc for why this is folded into the SAME
+// ErrMemberNotFound sentinel as an unknown member, rather than the
+// distinct ErrHouseholdNotFound the WebAuthn adapter uses.
+func TestMFABeginEnrollment_UnknownHouseholdRejected(t *testing.T) {
+	repo, _, memberID := newTestMFARepo(t)
+	err := repo.BeginEnrollment(testCtx(t), memberID, domain.NewHouseholdID(), []byte("secret"))
+	if !errors.Is(err, domain.ErrMemberNotFound) {
+		t.Errorf("BeginEnrollment for an unknown household: err = %v, want ErrMemberNotFound", err)
+	}
+	if _, err := repo.GetEnrollment(testCtx(t), memberID); !errors.Is(err, domain.ErrMFANotEnrolled) {
+		t.Errorf("no enrollment row must be created: err = %v, want ErrMFANotEnrolled", err)
+	}
+}
+
 // TestMFABeginEnrollment_CrossHouseholdCannotTouchVictimRow is the gated
 // tenant-isolation check: a BeginEnrollment call for an
 // ALREADY-ENROLLED member, but supplying a DIFFERENT household id than

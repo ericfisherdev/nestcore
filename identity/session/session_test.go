@@ -73,8 +73,10 @@ func TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother(t *testing.T)
 	t.Cleanup(poolB.Close)
 
 	cfg := config.SessionConfig{Secure: false, Lifetime: time.Hour}
-	smA := session.NewManager(poolA, cfg)
-	smB := session.NewManager(poolB, cfg)
+	smA, stopA := session.NewManager(poolA, cfg)
+	t.Cleanup(stopA)
+	smB, stopB := session.NewManager(poolB, cfg)
+	t.Cleanup(stopB)
 
 	ctx := testCtx(t)
 
@@ -109,7 +111,8 @@ func TestNewManager_SessionWrittenByOneInstanceIsReadableByAnother(t *testing.T)
 // identity/session's package doc documents.
 func TestNewManager_CookieDefaultsDocumented(t *testing.T) {
 	pool := harness.NewIsolatedPool(t, "session")
-	sm := session.NewManager(pool, config.SessionConfig{Secure: true, Lifetime: 2 * time.Hour})
+	sm, stop := session.NewManager(pool, config.SessionConfig{Secure: true, Lifetime: 2 * time.Hour})
+	t.Cleanup(stop)
 
 	if !sm.Cookie.HttpOnly {
 		t.Error("Cookie.HttpOnly = false, want true")

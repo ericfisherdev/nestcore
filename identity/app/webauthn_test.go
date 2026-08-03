@@ -301,23 +301,30 @@ func (a *syntheticAuthenticator) cosePublicKey() []byte {
 	return cose
 }
 
-// assertionResponseBodyFlagsUP is the authenticatorData flags byte for
-// "user present, user NOT verified" — sufficient for testWebAuthn(t)'s
-// test fixture, which sets no AuthenticatorSelection.UserVerification.
-const assertionResponseBodyFlagsUP = 0x01
+// Authenticator data flags bytes for the synthetic signer. Production
+// now requires user verification on the login ceremony (see
+// webauthnUserVerification's own doc), so every success-path assertion
+// must carry BOTH bits; assertionFlagsUP alone (user present, NOT
+// verified) exists only to drive the explicit rejection test proving
+// that requirement is enforced.
+const (
+	assertionFlagsUP   = 0x01 // user present only
+	assertionFlagsUPUV = 0x05 // user present AND verified
+)
 
 // sign builds and signs a real WebAuthn assertion response JSON body
 // (the same shape PublicKeyCredential.toJSON() produces for
 // navigator.credentials.get()) for rpID/origin/challenge/counter, and —
 // when userHandle is non-empty — includes it (the discoverable/passkey
-// login shape).
-func (a *syntheticAuthenticator) sign(t *testing.T, rpID, origin string, counter uint32, challenge, userHandle []byte) []byte {
+// login shape). flags is the authenticatorData flags byte (see
+// assertionFlagsUP/assertionFlagsUPUV above).
+func (a *syntheticAuthenticator) sign(t *testing.T, rpID, origin string, counter uint32, challenge, userHandle []byte, flags byte) []byte {
 	t.Helper()
 
 	rpIDHash := sha256.Sum256([]byte(rpID))
 	var counterBytes [4]byte
 	binary.BigEndian.PutUint32(counterBytes[:], counter)
-	authData := append(append([]byte{}, rpIDHash[:]...), byte(assertionResponseBodyFlagsUP))
+	authData := append(append([]byte{}, rpIDHash[:]...), flags)
 	authData = append(authData, counterBytes[:]...)
 
 	clientData := map[string]any{
@@ -382,6 +389,18 @@ func TestWebAuthnService_BeginRegistration_ReturnsCreationOptionsAndSession(t *t
 	}
 	if creation.Response.AuthenticatorSelection.ResidentKey != protocol.ResidentKeyRequirementPreferred {
 		t.Errorf("ResidentKey = %q, want %q", creation.Response.AuthenticatorSelection.ResidentKey, protocol.ResidentKeyRequirementPreferred)
+	}
+	// A credential registered without UV could never satisfy BeginLogin's
+	// own UV requirement — this is the direct regression test for that:
+	// the immutable W3C spec vector FinishRegistration's other tests use
+	// has UV clear, so it cannot exercise this without a forged
+	// signature (see webauthnUserVerification's own doc for why both
+	// ceremonies must agree).
+	if creation.Response.AuthenticatorSelection.UserVerification != protocol.VerificationRequired {
+		t.Errorf("AuthenticatorSelection.UserVerification = %q, want %q", creation.Response.AuthenticatorSelection.UserVerification, protocol.VerificationRequired)
+	}
+	if session.UserVerification != protocol.VerificationRequired {
+		t.Errorf("session.UserVerification = %q, want %q", session.UserVerification, protocol.VerificationRequired)
 	}
 	wantHandle := handles.Derive(memberID)
 	if !bytes.Equal(session.UserID, wantHandle) {
@@ -596,6 +615,15 @@ func TestWebAuthnService_BeginLogin_ReturnsEmptyAllowCredentials(t *testing.T) {
 	if len(session.UserID) != 0 {
 		t.Errorf("session.UserID = %v, want empty (usernameless — the server does not know who is authenticating yet)", session.UserID)
 	}
+	// A usernameless login is the SOLE authentication factor, so user
+	// verification must be required rather than left at go-webauthn's
+	// "preferred" default — see webauthnUserVerification's own doc.
+	if assertion.Response.UserVerification != protocol.VerificationRequired {
+		t.Errorf("Response.UserVerification = %q, want %q", assertion.Response.UserVerification, protocol.VerificationRequired)
+	}
+	if session.UserVerification != protocol.VerificationRequired {
+		t.Errorf("session.UserVerification = %q, want %q", session.UserVerification, protocol.VerificationRequired)
+	}
 }
 
 func TestWebAuthnService_FinishLogin_ValidResponse_ResolvesMemberAndUpdatesSignCount(t *testing.T) {
@@ -613,8 +641,8 @@ func TestWebAuthnService_FinishLogin_ValidResponse_ResolvesMemberAndUpdatesSignC
 	}
 
 	challenge := []byte("valid-login-fixed-test-challeng")
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle)
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge)}
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle, assertionFlagsUPUV)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
@@ -637,6 +665,46 @@ func TestWebAuthnService_FinishLogin_ValidResponse_ResolvesMemberAndUpdatesSignC
 	}
 }
 
+// TestWebAuthnService_FinishLogin_UserNotVerified_Fails is the direct
+// regression test for the UV requirement itself: an assertion carrying
+// only the user-PRESENT flag (no PIN/biometric performed) must be
+// rejected, proving BeginLogin's UserVerification: required setting is
+// actually enforced and not merely requested. Without this test, a
+// regression that dropped webauthnUserVerification from BeginLogin would
+// pass every other test in this file, since all of them sign with
+// assertionFlagsUPUV.
+func TestWebAuthnService_FinishLogin_UserNotVerified_Fails(t *testing.T) {
+	t.Parallel()
+	svc, repo, handles := newWebAuthnServiceFixture(t)
+	memberID := domain.NewMemberID()
+	householdID := domain.NewHouseholdID()
+	handle := handles.Derive(memberID)
+	credentialID := []byte("synthetic-cred-not-verified")
+	auth := newSyntheticAuthenticator(t, credentialID)
+
+	seed := testWebAuthnCredentialForLogin(memberID, credentialID, handle, auth.cosePublicKey(), 0)
+	if err := repo.Create(context.Background(), householdID, seed); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	challenge := []byte("not-verified-fixed-test-challen")
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle, assertionFlagsUP)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
+	if err != nil {
+		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
+	}
+
+	_, err = svc.FinishLogin(context.Background(), session, parsed)
+	if !errors.Is(err, domain.ErrWebAuthnVerificationFailed) {
+		t.Errorf("FinishLogin(user present but not verified): err = %v, want ErrWebAuthnVerificationFailed", err)
+	}
+	creds, _ := repo.ListByMember(context.Background(), householdID, memberID)
+	if len(creds) != 1 || creds[0].LastUsedAt != nil {
+		t.Error("a rejected (unverified) assertion must not update the credential's LastUsedAt/sign count")
+	}
+}
+
 func TestWebAuthnService_FinishLogin_UnknownUserHandle_Fails(t *testing.T) {
 	t.Parallel()
 	svc, repo, _ := newWebAuthnServiceFixture(t)
@@ -646,8 +714,8 @@ func TestWebAuthnService_FinishLogin_UnknownUserHandle_Fails(t *testing.T) {
 	// No credential seeded anywhere for this handle — FindByUserHandle
 	// returns domain.ErrMemberNotFound, which FinishLogin must report
 	// identically to any other verification failure (no oracle).
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, []byte("nobody-registered-this-handle"))
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge)}
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, []byte("nobody-registered-this-handle"), assertionFlagsUPUV)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
@@ -677,10 +745,10 @@ func TestWebAuthnService_FinishLogin_WrongChallenge_Fails(t *testing.T) {
 	}
 
 	challenge := []byte("wrong-challenge-fixed-test-vect")
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle)
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle, assertionFlagsUPUV)
 	// The SESSION's stored challenge does not match the one the
 	// assertion was actually signed against.
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString([]byte("this-is-not-the-real-challenge!"))}
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString([]byte("this-is-not-the-real-challenge!")), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
@@ -717,8 +785,8 @@ func TestWebAuthnService_FinishLogin_SignCountIncreases(t *testing.T) {
 	}
 
 	challenge := []byte("a-fixed-test-challenge-32-bytes")
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 6, challenge, handle)
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge)}
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 6, challenge, handle, assertionFlagsUPUV)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
@@ -750,8 +818,8 @@ func TestWebAuthnService_FinishLogin_SignCountDecreases_StillAllowsLogin(t *test
 	challenge := []byte("another-fixed-test-challenge-32")
 	// A decreased, NONZERO count — the exact "possible cloned
 	// authenticator" shape signCountSuspicious flags.
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 3, challenge, handle)
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge)}
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 3, challenge, handle, assertionFlagsUPUV)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
@@ -791,8 +859,8 @@ func TestWebAuthnService_FinishLogin_SignCountZero_NeverFlagsRegardlessOfStored(
 	}
 
 	challenge := []byte("yet-another-fixed-test-challeng")
-	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle)
-	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge)}
+	body := auth.sign(t, testWebAuthnRPID, testWebAuthnRPOrigin, 0, challenge, handle, assertionFlagsUPUV)
+	session := webauthn.SessionData{Challenge: base64.RawURLEncoding.EncodeToString(challenge), UserVerification: protocol.VerificationRequired}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
 		t.Fatalf("ParseCredentialRequestResponseBytes: %v", err)
