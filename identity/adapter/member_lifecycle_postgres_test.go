@@ -2,6 +2,7 @@ package adapter_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/ericfisherdev/nestcore/identity/adapter"
@@ -98,19 +99,24 @@ func TestUpdateMemberProfileDemoteLastActiveOwnerRefused(t *testing.T) {
 	h := seedHousehold(t, households, "Sole Owner Household")
 	owner := seedMemberWithRole(t, members, h, "Sole Owner", domain.RoleOwner)
 
-	err := members.UpdateMemberProfile(testCtx(t), h.ID, owner.ID, "Sole Owner", domain.RoleAdult)
+	// The display name is deliberately different from the seeded one: if
+	// the refusal only rejected the role change but silently applied the
+	// rename half of the statement, re-asserting the SAME name back would
+	// not catch it. The whole row update is one atomic statement.
+	err := members.UpdateMemberProfile(testCtx(t), h.ID, owner.ID, "Renamed But Refused", domain.RoleAdult)
 	if !errors.Is(err, domain.ErrLastActiveOwner) {
 		t.Errorf("UpdateMemberProfile(demote sole owner) error = %v, want ErrLastActiveOwner", err)
 	}
 
-	// The refusal must not have silently applied the rename either — the
-	// whole row update is one atomic statement.
 	got, err := members.GetMember(testCtx(t), owner.ID)
 	if err != nil {
 		t.Fatalf("GetMember: %v", err)
 	}
 	if got.Role != domain.RoleOwner {
 		t.Errorf("Role after refused demotion = %q, want unchanged %q", got.Role, domain.RoleOwner)
+	}
+	if got.DisplayName != "Sole Owner" {
+		t.Errorf("DisplayName after refused demotion = %q, want unchanged %q", got.DisplayName, "Sole Owner")
 	}
 }
 
@@ -198,6 +204,14 @@ func TestSetMemberActiveDeactivateNonOwnerAlwaysAllowed(t *testing.T) {
 	if err := members.SetMemberActive(testCtx(t), h.ID, adult.ID, false); err != nil {
 		t.Fatalf("SetMemberActive(deactivate adult): %v", err)
 	}
+
+	got, err := members.GetMember(testCtx(t), adult.ID)
+	if err != nil {
+		t.Fatalf("GetMember: %v", err)
+	}
+	if got.Active {
+		t.Error("Active after deactivation = true, want false")
+	}
 }
 
 func TestSetMemberActiveReactivateRoundTrip(t *testing.T) {
@@ -284,5 +298,49 @@ func TestUpdateMemberProfileInvalidRole(t *testing.T) {
 
 	if err := members.UpdateMemberProfile(testCtx(t), h.ID, member.ID, "Maya", domain.Role("admin")); err == nil {
 		t.Fatal("UpdateMemberProfile(invalid role) error = nil, want non-nil")
+	}
+}
+
+// TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock
+// deactivates the household's two owners at the same time, from two
+// goroutines racing against the same pool. The household-scoped advisory
+// lock each guarded UPDATE takes (see householdWriteLockSQL) must
+// serialize the two rather than let them cross-lock each other's target
+// row: exactly one succeeds and the other is refused with
+// ErrLastActiveOwner — a real Postgres deadlock (SQLSTATE 40P01) would
+// instead surface as a third, distinct wrapped error on whichever side
+// lost Postgres's deadlock detector's coin flip.
+func TestSetMemberActiveConcurrentDeactivationsSerializeWithoutDeadlock(t *testing.T) {
+	households, members := newMemberTestRepos(t)
+	h := seedHousehold(t, households, "Concurrent Deactivation Household")
+	ownerA := seedMemberWithRole(t, members, h, "Owner A", domain.RoleOwner)
+	ownerB := seedMemberWithRole(t, members, h, "Owner B", domain.RoleOwner)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = members.SetMemberActive(testCtx(t), h.ID, ownerA.ID, false)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = members.SetMemberActive(testCtx(t), h.ID, ownerB.ID, false)
+	}()
+	wg.Wait()
+
+	var succeeded, refused int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, domain.ErrLastActiveOwner):
+			refused++
+		default:
+			t.Errorf("concurrent SetMemberActive error = %v, want nil or ErrLastActiveOwner", err)
+		}
+	}
+	if succeeded != 1 || refused != 1 {
+		t.Errorf("concurrent SetMemberActive: succeeded=%d refused=%d, want exactly 1 of each", succeeded, refused)
 	}
 }

@@ -102,26 +102,50 @@ func (r *MemberRepository) ListMembers(ctx context.Context, householdID domain.H
 	return members, nil
 }
 
+// householdWriteLockSQL is a CTE, prefixed onto UpdateMemberProfile's and
+// SetMemberActive's guarded UPDATE, that takes a household-scoped
+// transaction-duration advisory lock before the UPDATE touches any row.
+// The enclosing statement's "FROM household_lock" (with no join condition,
+// against this single-row CTE) is what forces Postgres to actually
+// evaluate it rather than treat it as dead code: an unreferenced CTE has
+// no such guarantee, but joining a one-row relation into the UPDATE's own
+// FROM leaves its row set unchanged while still requiring the CTE to run
+// first.
+//
+// This lock is what makes the last-active-owner guard (below) race-safe
+// rather than a check-then-write, AND why the guard's own EXISTS subquery
+// needs no locking of its own: earlier revisions of this guard used a
+// correlated "FOR UPDATE" on the candidate "other owner" rows instead, but
+// that deadlocks under concurrency — demoting owner A takes A's row lock
+// (as the UPDATE's own target) and then wants a FOR UPDATE lock on B (as
+// a candidate "other" owner), while a concurrent demotion of B takes B's
+// row lock and wants a lock on A: two transactions each holding what the
+// other wants, in reverse order, is a textbook deadlock, and Postgres
+// aborts one of them with a 40P01 error rather than serializing them.
+// Serializing on ONE advisory lock per household up front instead means
+// the second transaction blocks before taking any row lock at all, so the
+// two can never hold conflicting locks in opposite orders.
+//
+// hashtext's 32-bit range makes a false collision between two different
+// households' lock keys possible in principle; the only cost of one is a
+// spurious moment of extra serialization between two unrelated
+// households' guarded mutations, never an incorrect result.
+const householdWriteLockSQL = `
+	WITH household_lock AS (
+		SELECT pg_advisory_xact_lock(hashtext($2)) AS locked
+	)`
+
 // lastActiveOwnerGuardSQL is the fragment shared by UpdateMemberProfile and
 // SetMemberActive: it evaluates to true exactly when the pending change
 // would demote or deactivate the household's sole active owner, in which
-// case the enclosing UPDATE's WHERE clause must reject the row.
-//
-// The correlated EXISTS subquery's "FOR UPDATE" is what makes the guard
-// race-safe rather than a check-then-write: without it, a plain SELECT
-// under READ COMMITTED reads the last COMMITTED row version and does not
-// wait on a concurrent, not-yet-committed UPDATE to another owner in the
-// same household, so two concurrent demotions could each see the other's
-// stale "still an active owner" state and both proceed, leaving zero
-// active owners. FOR UPDATE forces the second transaction's subquery to
-// block until the first commits (or rolls back) and then re-evaluate
-// against the post-commit state, so the two serialize correctly.
+// case the enclosing UPDATE's WHERE clause must reject the row. Every
+// query embedding it, together with householdWriteLockSQL, must bind $1
+// to the member id and $2 to the household id.
 const lastActiveOwnerGuardSQL = `
 	NOT EXISTS (
 		SELECT 1 FROM identity.member other
-		 WHERE other.household_id = $2 AND other.id <> $1
+		 WHERE other.household_id = $2::uuid AND other.id <> $1
 		   AND other.role = 'owner' AND other.active
-		   FOR UPDATE
 	)`
 
 // UpdateMemberProfile renames a member and/or changes their role, subject
@@ -130,12 +154,13 @@ func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID 
 	if !role.Valid() {
 		return fmt.Errorf("adapter: update member profile: invalid role %q", role)
 	}
-	q := `
-		UPDATE identity.member
+	q := householdWriteLockSQL + `
+		UPDATE identity.member AS m
 		   SET display_name = $3, role = $4, updated_at = now()
-		 WHERE id = $1 AND household_id = $2
+		  FROM household_lock
+		 WHERE m.id = $1 AND m.household_id = $2::uuid
 		   AND NOT (
-		         role = 'owner' AND active AND $4 <> 'owner' AND ` + lastActiveOwnerGuardSQL + `
+		         m.role = 'owner' AND m.active AND $4 <> 'owner' AND ` + lastActiveOwnerGuardSQL + `
 		   )`
 	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), displayName, role.String())
 	if err != nil {
@@ -156,12 +181,13 @@ func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID 
 // "$3 = false" clause is false in that case, so the surrounding NOT(...)
 // is unconditionally true and the row updates.
 func (r *MemberRepository) SetMemberActive(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID, active bool) error {
-	q := `
-		UPDATE identity.member
+	q := householdWriteLockSQL + `
+		UPDATE identity.member AS m
 		   SET active = $3, updated_at = now()
-		 WHERE id = $1 AND household_id = $2
+		  FROM household_lock
+		 WHERE m.id = $1 AND m.household_id = $2::uuid
 		   AND NOT (
-		         $3 = false AND role = 'owner' AND active AND ` + lastActiveOwnerGuardSQL + `
+		         $3 = false AND m.role = 'owner' AND m.active AND ` + lastActiveOwnerGuardSQL + `
 		   )`
 	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), active)
 	if err != nil {
