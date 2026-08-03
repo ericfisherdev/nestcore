@@ -17,8 +17,11 @@ type MemberRepository struct {
 	dbtx db.TX
 }
 
-// Compile-time assurance the adapter satisfies the port.
-var _ domain.MemberRepository = (*MemberRepository)(nil)
+// Compile-time assurance the adapter satisfies both ports.
+var (
+	_ domain.MemberRepository = (*MemberRepository)(nil)
+	_ domain.MemberWriter     = (*MemberRepository)(nil)
+)
 
 // NewMemberRepository constructs the repository with an injected query
 // executor. See HouseholdRepository's constructor doc for why the
@@ -97,6 +100,96 @@ func (r *MemberRepository) ListMembers(ctx context.Context, householdID domain.H
 		return nil, fmt.Errorf("list members: %w", err)
 	}
 	return members, nil
+}
+
+// lastActiveOwnerGuardSQL is the fragment shared by UpdateMemberProfile and
+// SetMemberActive: it evaluates to true exactly when the pending change
+// would demote or deactivate the household's sole active owner, in which
+// case the enclosing UPDATE's WHERE clause must reject the row.
+//
+// The correlated EXISTS subquery's "FOR UPDATE" is what makes the guard
+// race-safe rather than a check-then-write: without it, a plain SELECT
+// under READ COMMITTED reads the last COMMITTED row version and does not
+// wait on a concurrent, not-yet-committed UPDATE to another owner in the
+// same household, so two concurrent demotions could each see the other's
+// stale "still an active owner" state and both proceed, leaving zero
+// active owners. FOR UPDATE forces the second transaction's subquery to
+// block until the first commits (or rolls back) and then re-evaluate
+// against the post-commit state, so the two serialize correctly.
+const lastActiveOwnerGuardSQL = `
+	NOT EXISTS (
+		SELECT 1 FROM identity.member other
+		 WHERE other.household_id = $2 AND other.id <> $1
+		   AND other.role = 'owner' AND other.active
+		   FOR UPDATE
+	)`
+
+// UpdateMemberProfile renames a member and/or changes their role, subject
+// to the last-active-owner guard documented on domain.MemberWriter.
+func (r *MemberRepository) UpdateMemberProfile(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID, displayName string, role domain.Role) error {
+	if !role.Valid() {
+		return fmt.Errorf("adapter: update member profile: invalid role %q", role)
+	}
+	q := `
+		UPDATE identity.member
+		   SET display_name = $3, role = $4, updated_at = now()
+		 WHERE id = $1 AND household_id = $2
+		   AND NOT (
+		         role = 'owner' AND active AND $4 <> 'owner' AND ` + lastActiveOwnerGuardSQL + `
+		   )`
+	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), displayName, role.String())
+	if err != nil {
+		if isConstraintViolation(err, uniqueViolation, memberHouseholdNameUniq) {
+			return domain.ErrDuplicateMember
+		}
+		return fmt.Errorf("update member profile: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return r.memberWriteFailureReason(ctx, householdID, id)
+	}
+	return nil
+}
+
+// SetMemberActive deactivates or reactivates a member, subject to the
+// last-active-owner guard documented on domain.MemberWriter. Reactivation
+// (active true) is never refused: the guard fragment's leading
+// "$3 = false" clause is false in that case, so the surrounding NOT(...)
+// is unconditionally true and the row updates.
+func (r *MemberRepository) SetMemberActive(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID, active bool) error {
+	q := `
+		UPDATE identity.member
+		   SET active = $3, updated_at = now()
+		 WHERE id = $1 AND household_id = $2
+		   AND NOT (
+		         $3 = false AND role = 'owner' AND active AND ` + lastActiveOwnerGuardSQL + `
+		   )`
+	tag, err := r.dbtx.Exec(ctx, q, id.String(), householdID.String(), active)
+	if err != nil {
+		return fmt.Errorf("set member active: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return r.memberWriteFailureReason(ctx, householdID, id)
+	}
+	return nil
+}
+
+// memberWriteFailureReason distinguishes, after an UpdateMemberProfile or
+// SetMemberActive UPDATE matched zero rows, whether id simply does not
+// exist in householdID (ErrMemberNotFound) or the last-active-owner guard
+// rejected the change (ErrLastActiveOwner). Members are never deleted
+// (identity/migrate's package doc: deactivation, not deletion), so this
+// existence check cannot itself race the UPDATE it is explaining.
+func (r *MemberRepository) memberWriteFailureReason(ctx context.Context, householdID domain.HouseholdID, id domain.MemberID) error {
+	const q = `SELECT 1 FROM identity.member WHERE id = $1 AND household_id = $2`
+	var exists int
+	err := r.dbtx.QueryRow(ctx, q, id.String(), householdID.String()).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrMemberNotFound
+		}
+		return fmt.Errorf("determine member write failure reason: %w", err)
+	}
+	return domain.ErrLastActiveOwner
 }
 
 // row abstracts pgx.Row and pgx.Rows for scanMember.
