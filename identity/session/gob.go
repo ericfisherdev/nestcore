@@ -26,9 +26,12 @@ import (
 // registering it HERE first, releasing nestcore, and having BOTH apps adopt
 // that version BEFORE either one writes the type. Writing it from one app
 // while the other still lacks the registration does not degrade gracefully
-// — the other app's session Load fails for every key, not just the new one,
-// which reads as a logged-out user rather than an error anyone will trace
-// back to gob.
+// — the other app's session Load fails for the whole blob, not just the new
+// key. Neither app overrides scs's ErrorFunc, so LoadAndSave falls back to
+// defaultErrorFunc: the gob error is logged and EVERY request carrying that
+// cookie gets an HTTP 500. That is an outage for the lagging app's
+// authenticated traffic, not a degraded login — the symptom to look for is a
+// 500 storm with a gob type error in the logs.
 func init() {
 	gob.Register(time.Time{})
 	gob.Register(webauthn.SessionData{})
