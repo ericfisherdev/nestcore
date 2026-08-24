@@ -101,7 +101,7 @@ func TestUpDownUp(t *testing.T) {
 
 	tables := []string{
 		"household", "member", "member_mfa", "member_recovery_code",
-		"member_credential", "sessions",
+		"member_credential", "sessions", "member_pin",
 	}
 	for _, table := range tables {
 		if !tableExists(t, dsn, table) {
