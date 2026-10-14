@@ -97,7 +97,7 @@ jobs:
         # to regenerate a file this job already produced. No `always()`: a
         # failed test run means a partial profile, and a failed build skips the
         # scan anyway.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
           path: coverage.out
@@ -188,7 +188,7 @@ jobs:
         # only ever sees the build job's profile -- in which every gated test
         # self-skipped for want of a database. That is what made db/migrate look
         # 20% covered when its tests do run, and pass, in this job.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-gated
           path: coverage.gated.out
