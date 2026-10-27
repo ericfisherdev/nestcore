@@ -166,20 +166,26 @@ func TestAttemptLimiter_RefundGivesBackOneAttempt(t *testing.T) {
 	}
 }
 
-// TestAttemptLimiter_RefundOfTheEngagingAttemptLiftsTheLockout: a success that
-// happened to be the Threshold-th attempt must not leave its key locked.
-func TestAttemptLimiter_RefundOfTheEngagingAttemptLiftsTheLockout(t *testing.T) {
+// TestAttemptLimiter_RefundNeverLiftsALockout: an attempt admitted before the
+// lockout engaged may be refunded after it (e.g. it succeeded). That must not
+// undo the strikes that locked the key.
+func TestAttemptLimiter_RefundNeverLiftsALockout(t *testing.T) {
 	l := newLimiter()
 	now := time.Now()
-	lockOut(t, l, testKey, now)
+
+	l.Attempt(testKey, now) // the legitimate attempt, later refunded
+	attempt(l, testKey, now, testThreshold-1)
+	if !l.Locked(testKey, now) {
+		t.Fatal("setup: expected the key to be locked")
+	}
 
 	l.Refund(testKey)
 
-	if l.Locked(testKey, now) {
-		t.Error("refunding the attempt that engaged the lockout must lift it")
+	if !l.Locked(testKey, now) {
+		t.Error("a refund must not lift a lockout")
 	}
-	if got := l.Attempt(testKey, now); got != ratelimit.AllowedLastAttempt {
-		t.Errorf("attempt after the refund = %v, want AllowedLastAttempt (one attempt left)", got)
+	if got := l.Attempt(testKey, now); got != ratelimit.Denied {
+		t.Errorf("attempt after the refund = %v, want Denied", got)
 	}
 	l.Refund("never-seen") // must not panic
 }

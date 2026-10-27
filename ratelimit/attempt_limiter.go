@@ -174,24 +174,23 @@ func (l *AttemptLimiter) Attempt(key string, now time.Time) Outcome {
 }
 
 // Refund gives back one attempt previously admitted for key, for an attempt
-// that should not have counted (a success against a key that must not be
-// cleared, an internal error, a request rejected by a second limiter). It
-// keeps the invariant that a key's count is admitted minus refunded, so if the
-// refunded attempt was the one that engaged the lockout, the lockout is lifted
-// with it. It does nothing for an unknown key.
+// that should not have counted (an internal error, a request rejected by a
+// second limiter). It only ever lowers the count of a key that is still
+// counting, forgetting it at zero. A locked key is left alone: an anonymous
+// refund cannot tell whether it belongs to the attempt that engaged the
+// lockout or to an unrelated earlier one, and lifting a lockout on the
+// strength of the latter would let any in-flight success undo an attacker's
+// strikes. The lockout stands until it expires or [AttemptLimiter.Reset].
 func (l *AttemptLimiter) Refund(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e, tracked := l.entries[key]
-	if !tracked || e.attempts == 0 {
+	if !tracked || e.locked || e.attempts == 0 {
 		return
 	}
 	e.attempts--
-	switch {
-	case e.attempts == 0:
+	if e.attempts == 0 {
 		l.removeLocked(e)
-	case e.locked:
-		l.unlockLocked(e)
 	}
 }
 
@@ -257,15 +256,6 @@ func (l *AttemptLimiter) lockLocked(e *entry, now time.Time) {
 	e.locked = true
 	e.lockedUntil = now.Add(l.policy.LockoutWindow)
 	e.element = l.locks.PushFront(e)
-}
-
-// unlockLocked returns e to the counting list, lifting its lockout. Callers
-// must hold l.mu.
-func (l *AttemptLimiter) unlockLocked(e *entry) {
-	l.locks.Remove(e.element)
-	e.locked = false
-	e.lockedUntil = time.Time{}
-	e.element = l.counting.PushFront(e)
 }
 
 // removeLocked deletes e from the map and whichever list holds it. Callers
