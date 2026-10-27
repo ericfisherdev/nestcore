@@ -18,8 +18,11 @@ env:
   # Go minor version for every setup-go step below. Deliberately not read from
   # go.mod: dependency bumps can raise its go directive to a full X.Y.0, and
   # setup-go installs a full version exactly, which would pin CI to the first
-  # release of the minor and drop every later security patch. A bare X.Y
-  # resolves to the newest patch. Bump this together with go.mod's directive.
+  # release of the minor and drop every later security patch. A bare X.Y plus
+  # check-latest on each setup-go step resolves to the newest released patch;
+  # without check-latest, setup-go returns the newest patch in the runner's
+  # tool cache, which lags each point release until the image is refreshed.
+  # Bump this together with go.mod's directive.
   GO_VERSION: '1.26'
 
 concurrency:
@@ -43,6 +46,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve against the go-versions manifest, not the tool cache.
+          check-latest: true
           # Caching is handled explicitly below. setup-go's built-in cache
           # derives its key solely from the Go version and the go.sum hash, with
           # no job discriminator, so every job in this workflow would contend for
@@ -154,6 +159,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve against the go-versions manifest, not the tool cache.
+          check-latest: true
           cache: false
 
       - name: Restore Go caches
@@ -196,6 +203,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve against the go-versions manifest, not the tool cache.
+          check-latest: true
           # See the build job: caching is explicit and job-scoped.
           cache: false
 
@@ -260,6 +269,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve against the go-versions manifest, not the tool cache.
+          check-latest: true
           # Deliberately uncached. This job only compiles `conform`, finishes in
           # well under a minute, and is never on the critical path; sharing a
           # cache key with the heavier jobs is what let it clobber their caches.
