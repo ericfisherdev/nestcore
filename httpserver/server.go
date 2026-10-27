@@ -49,6 +49,13 @@ const (
 type Config struct {
 	Server config.ServerConfig
 	HSTS   config.HSTSConfig
+	// CSP is the Content-Security-Policy emitted on every response. The zero
+	// value (nil) means middleware.FrameAncestorsSelf, so an application that
+	// sets nothing keeps the historical frame-ancestors-only header; an
+	// application opts into a stricter policy by setting this field. Only nil
+	// selects the default: a non-nil empty policy is honoured and suppresses
+	// the Content-Security-Policy header.
+	CSP middleware.ContentSecurityPolicy
 }
 
 // ReadinessFunc reports whether the server's backing dependencies (e.g. the
@@ -125,7 +132,7 @@ func New(cfg Config, deps Deps) *http.Server {
 	chain := []middleware.Middleware{
 		middleware.RequestID,
 		middleware.ForwardedHeaders(cfg.Server.TrustedProxyPrefixes()),
-		middleware.SecurityHeaders(hstsHeaderValue(cfg.HSTS)),
+		middleware.SecurityHeadersWithPolicy(hstsHeaderValue(cfg.HSTS), cspOrDefault(cfg.CSP)),
 		middleware.RequestLogger(deps.Logger),
 		middleware.Metrics(deps.HTTPMetrics),
 		middleware.Recoverer(deps.Logger),
@@ -171,6 +178,14 @@ func New(cfg Config, deps Deps) *http.Server {
 		// 1.3 when available and falls back no lower than 1.2.
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
+}
+
+// cspOrDefault returns p, or middleware.FrameAncestorsSelf when p is unset.
+func cspOrDefault(p middleware.ContentSecurityPolicy) middleware.ContentSecurityPolicy {
+	if p == nil {
+		return middleware.FrameAncestorsSelf
+	}
+	return p
 }
 
 // hstsHeaderValue builds the Strict-Transport-Security header value from cfg, or
