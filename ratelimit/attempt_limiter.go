@@ -102,8 +102,12 @@ type AttemptLimiter struct {
 	mu        sync.Mutex
 	entries   map[string]*entry
 	nextEpoch uint64
-	counting  *list.List // unlocked entries, most recently active first
-	locks     *list.List // locked entries, most recently locked first
+	// latest is the newest time any call has presented. Cancel has no clock of
+	// its own, so it uses this to expire entries and to stamp a key it returns
+	// to the counting list, keeping that list ordered by activity.
+	latest   time.Time
+	counting *list.List // unlocked entries, most recently active first
+	locks    *list.List // locked entries, most recently locked first
 }
 
 // NewAttemptLimiter constructs an empty limiter enforcing p.
@@ -135,7 +139,7 @@ func NewAttemptLimiter(p Policy) *AttemptLimiter {
 func (l *AttemptLimiter) Locked(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.expireLocked(now)
+	l.observeLocked(now)
 	e, tracked := l.entries[key]
 	if !tracked {
 		return l.saturatedLocked()
@@ -169,7 +173,7 @@ type Reservation struct {
 func (l *AttemptLimiter) Reserve(key string, now time.Time) (Outcome, Reservation) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.expireLocked(now)
+	l.observeLocked(now)
 
 	e, tracked := l.entries[key]
 	switch {
@@ -199,20 +203,24 @@ func (l *AttemptLimiter) Reserve(key string, now time.Time) (Outcome, Reservatio
 // have counted (an internal error, a request rejected by a second limiter).
 // Call it at most once per reservation.
 //
-// It is exact about which attempt it cancels. If r is the attempt that
-// engaged the key's lockout, the lockout is lifted with it; if the lockout was
-// engaged by a different attempt, it stands, so an unrelated in-flight attempt
-// can never undo an attacker's strikes. A reservation that outlived its entry
-// (reset, expired or evicted since) cancels nothing.
+// It is exact about which attempt it cancels. Every cancelled attempt is given
+// back, so concurrent cancels never leave strikes behind. But a lockout is
+// lifted only when r is the attempt that engaged it; if a different attempt
+// engaged it, it stands, so an unrelated in-flight attempt can never undo an
+// attacker's strikes. A reservation that outlived its entry (reset, expired or
+// evicted since) cancels nothing.
 func (l *AttemptLimiter) Cancel(r Reservation) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expireLocked(l.latest)
 	e, tracked := l.entries[r.key]
-	if !tracked || r.epoch == 0 || e.epoch != r.epoch || (e.locked && !r.engaged) {
+	if !tracked || r.epoch == 0 || e.epoch != r.epoch {
 		return
 	}
 	e.attempts--
 	switch {
+	case e.locked && !r.engaged:
+		// The engaging attempt is still counted, so the lockout stands.
 	case e.attempts == 0:
 		l.removeLocked(e)
 	case e.locked:
@@ -309,13 +317,24 @@ func (l *AttemptLimiter) lockLocked(e *entry, now time.Time) {
 	e.element = l.locks.PushFront(e)
 }
 
-// unlockLocked returns e to the counting list, lifting its lockout. Callers
-// must hold l.mu.
+// unlockLocked returns e to the counting list, lifting its lockout. It is
+// stamped with the newest time seen so that pushing it to the front keeps the
+// list ordered by activity. Callers must hold l.mu.
 func (l *AttemptLimiter) unlockLocked(e *entry) {
 	l.locks.Remove(e.element)
 	e.locked = false
 	e.lockedUntil = time.Time{}
+	e.lastActivity = l.latest
 	e.element = l.counting.PushFront(e)
+}
+
+// observeLocked records now as the newest time seen and expires what it has
+// aged out. Callers must hold l.mu.
+func (l *AttemptLimiter) observeLocked(now time.Time) {
+	if now.After(l.latest) {
+		l.latest = now
+	}
+	l.expireLocked(now)
 }
 
 // removeLocked deletes e from the map and whichever list holds it. Callers
