@@ -1,13 +1,28 @@
 // Package ratelimit provides a keyed strike counter with a hard lockout
 // window, for guarding credential-checking endpoints against brute force.
 //
-// An [AttemptLimiter] counts failures per caller-supplied string key — an
-// email, a client IP, any attacker-controlled value — and, once a key has
-// failed more than its [Policy.Threshold] times within [Policy.LockoutWindow],
-// reports it locked until the window passes. It is deliberately a strike
-// counter, not a token bucket: there is no refill rate, a key is either
-// within its budget or locked out. The key space is attacker-supplied, so
-// the tracked-key map is bounded by [Policy.MaxTrackedKeys].
+// An [AttemptLimiter] admits a bounded number of attempts per caller-supplied
+// string key — an email, a client IP, any attacker-controlled value — and
+// locks a key out for [Policy.LockoutWindow] once it has used its
+// [Policy.Threshold]. It is a strike counter, not a token bucket: there is no
+// refill rate, a key is either within its budget or locked out.
+//
+// # Atomic admission
+//
+// [AttemptLimiter.Attempt] checks the lockout and counts the attempt under one
+// lock. Checking first and recording afterwards would let any number of
+// concurrent requests pass the check before the first is counted. A caller
+// that wants only failures to count gives a successful attempt back with
+// [AttemptLimiter.Reset] (forget the key) or [AttemptLimiter.Refund] (return
+// that one attempt, for keys a success must not clear).
+//
+// # Bounded memory
+//
+// The key space is attacker-supplied, so at most [Policy.MaxTrackedKeys] keys
+// are held. A lockout is never evicted to make room: if every slot holds a
+// lockout, new keys are denied until one expires. Bookkeeping is amortised
+// O(1) per call, so a flood of distinct keys cannot make callers queue behind
+// a scan of the whole table.
 //
 // # Process-lifetime state
 //

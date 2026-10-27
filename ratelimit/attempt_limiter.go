@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -8,46 +9,75 @@ import (
 // Policy tunes an [AttemptLimiter]. Every field must be positive;
 // [NewAttemptLimiter] panics otherwise.
 type Policy struct {
-	// Threshold is the number of failures tolerated per key. The failure
-	// after that (failure number Threshold+1) engages the lockout, so a
-	// Threshold of 5 lets five wrong attempts through and locks on the
-	// sixth.
+	// Threshold is the number of attempts admitted per key per window. The
+	// Threshold-th admitted attempt engages the lockout, so a Threshold of 5
+	// admits five attempts and denies the sixth.
 	Threshold int
-	// LockoutWindow is both how long a key stays locked once it crosses the
-	// Threshold and how long strikes are remembered: a key idle for longer
-	// than the window starts counting from zero again, so strikes mean "N
-	// failures within a window", not "N failures ever".
+	// LockoutWindow is both how long a key stays locked once it uses up its
+	// Threshold and how long attempts are remembered: a key idle for a full
+	// window starts counting from zero again, so the budget means "N
+	// attempts within a window", not "N attempts ever".
 	LockoutWindow time.Duration
 	// MaxTrackedKeys bounds the number of distinct keys held in memory. Keys
 	// are attacker-supplied, so an unbounded map is a memory-exhaustion
-	// vector. When the cap is reached, inserting a new key first sweeps
-	// entries idle for longer than LockoutWindow and, if the map is still
-	// full, evicts the least recently active entry. A flood of MaxTrackedKeys
-	// distinct live keys can therefore push out even a live lockout; pair a
-	// per-key limiter with a per-client one so such a flood is itself capped.
+	// vector. At the cap, a new key first displaces the least recently active
+	// key that is NOT locked. A lockout is never evicted: when every tracked
+	// key is locked, new keys are denied (fail closed) until one expires.
 	MaxTrackedKeys int
 }
 
-// attemptState is one key's in-memory strike state.
-type attemptState struct {
-	failures     int
+// Outcome is the verdict of [AttemptLimiter.Attempt]. The zero value is
+// [Denied], so an unset Outcome fails closed.
+type Outcome int
+
+const (
+	// Denied means the attempt must not proceed: the key is locked out, or
+	// the limiter is saturated with lockouts and cannot track a new key.
+	Denied Outcome = iota
+	// Allowed means the attempt may proceed.
+	Allowed
+	// AllowedLastAttempt means the attempt may proceed but it used up the
+	// key's budget and engaged the lockout. It is returned exactly once per
+	// lockout, so callers can log one line per lockout.
+	AllowedLastAttempt
+)
+
+// Permitted reports whether the attempt may proceed.
+func (o Outcome) Permitted() bool { return o != Denied }
+
+// entry is one key's in-memory state. It sits in exactly one of the
+// limiter's two recency lists, described on [AttemptLimiter].
+type entry struct {
+	key          string
+	attempts     int
+	locked       bool
 	lockedUntil  time.Time
 	lastActivity time.Time
+	element      *list.Element
 }
 
-// AttemptLimiter counts failures per key and locks a key out for
-// Policy.LockoutWindow once it exceeds Policy.Threshold. It is safe for
-// concurrent use. Construct one with [NewAttemptLimiter]; the zero value is
-// not usable.
+// AttemptLimiter admits a bounded number of attempts per key per window and
+// locks a key out once it has used its budget. It is safe for concurrent use.
+// Construct one with [NewAttemptLimiter]; the zero value is not usable.
 //
-// Callers check [AttemptLimiter.Locked] BEFORE doing the guarded work, record
-// the outcome with [AttemptLimiter.RecordFailure] or
-// [AttemptLimiter.RecordSuccess], and pass the current time on every call.
+// [AttemptLimiter.Attempt] checks the lockout and counts the attempt under one
+// lock, so concurrent requests cannot all slip past a check made before any of
+// them is counted. A caller that wants only failures to count reports a
+// successful attempt back with [AttemptLimiter.Reset] or
+// [AttemptLimiter.Refund].
+//
+// Entries are kept in two lists, each ordered by recency of activity: keys
+// still collecting attempts, and keys that are locked. A lockout ends exactly
+// one window after the attempt that engaged it, so each list expires from its
+// back and every operation is amortised O(1) however many keys are tracked.
+// Callers must pass non-decreasing times.
 type AttemptLimiter struct {
 	policy Policy
 
-	mu    sync.Mutex
-	state map[string]*attemptState
+	mu       sync.Mutex
+	entries  map[string]*entry
+	counting *list.List // unlocked entries, most recently active first
+	locks    *list.List // locked entries, most recently locked first
 }
 
 // NewAttemptLimiter constructs an empty limiter enforcing p.
@@ -64,105 +94,151 @@ func NewAttemptLimiter(p Policy) *AttemptLimiter {
 	case p.MaxTrackedKeys < 1:
 		panic("ratelimit: Policy.MaxTrackedKeys must be at least 1")
 	}
-	return &AttemptLimiter{policy: p, state: make(map[string]*attemptState)}
+	return &AttemptLimiter{
+		policy:   p,
+		entries:  make(map[string]*entry),
+		counting: list.New(),
+		locks:    list.New(),
+	}
 }
 
-// Locked reports whether key is inside a lockout window as of now.
+// Locked reports, without counting anything, whether an attempt for key would
+// be denied as of now. It is a cheap pre-check; [AttemptLimiter.Attempt] is the
+// authoritative gate. A key the limiter has no room to track is reported
+// locked, matching what Attempt would do.
 func (l *AttemptLimiter) Locked(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st, ok := l.state[key]
-	return ok && now.Before(st.lockedUntil)
+	l.expireLocked(now)
+	e, tracked := l.entries[key]
+	if !tracked {
+		return l.saturatedLocked()
+	}
+	return e.locked && now.Before(e.lockedUntil)
 }
 
-// RecordFailure records one failure for key as of now and returns
-// lockedOut=true exactly once per lockout: on the failure that crosses
-// Policy.Threshold. Callers use it to log one line per lockout rather than
-// one per rejected attempt.
+// Attempt atomically checks key's lockout and, unless denied, counts one
+// attempt against its budget.
 //
-// Strikes older than Policy.LockoutWindow, and strikes left over from a
-// lockout that has since expired, are discarded before this failure is
-// counted. A failure recorded while the key is already locked changes
-// nothing: the lockout end is fixed when it engages.
-func (l *AttemptLimiter) RecordFailure(key string, now time.Time) (lockedOut bool) {
+// A denied attempt is not counted, so retrying a locked key does not extend
+// its lockout. The Threshold-th admitted attempt returns
+// [AllowedLastAttempt] and locks the key for Policy.LockoutWindow.
+func (l *AttemptLimiter) Attempt(key string, now time.Time) Outcome {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := l.stateForFailureLocked(key, now)
-	if now.Before(st.lockedUntil) {
+	l.expireLocked(now)
+
+	e, tracked := l.entries[key]
+	switch {
+	case !tracked:
+		if !l.makeRoomLocked() {
+			return Denied
+		}
+		e = &entry{key: key}
+		e.element = l.counting.PushFront(e)
+		l.entries[key] = e
+	case e.locked && now.Before(e.lockedUntil):
+		return Denied
+	}
+
+	e.attempts++
+	e.lastActivity = now
+	if e.attempts < l.policy.Threshold {
+		l.counting.MoveToFront(e.element)
+		return Allowed
+	}
+	l.lockLocked(e, now)
+	return AllowedLastAttempt
+}
+
+// Refund gives back one attempt previously admitted for key, for an attempt
+// that should not have counted (a success against a key that must not be
+// cleared, or an internal error). It does nothing to a locked key, whose
+// lockout is already engaged, or to an unknown key.
+func (l *AttemptLimiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, tracked := l.entries[key]
+	if !tracked || e.locked || e.attempts == 0 {
+		return
+	}
+	e.attempts--
+	if e.attempts == 0 {
+		l.removeLocked(e)
+	}
+}
+
+// Reset forgets key entirely, lockout included, e.g. after a correct password.
+func (l *AttemptLimiter) Reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, tracked := l.entries[key]; tracked {
+		l.removeLocked(e)
+	}
+}
+
+// idleForAWindow reports whether e has seen no activity for a full window, so
+// whatever it counted has aged out. Callers must hold l.mu.
+func (l *AttemptLimiter) idleForAWindow(e *entry, now time.Time) bool {
+	return !e.lastActivity.After(now.Add(-l.policy.LockoutWindow))
+}
+
+// expireLocked drops entries whose window has fully elapsed, oldest first.
+// Callers must hold l.mu.
+func (l *AttemptLimiter) expireLocked(now time.Time) {
+	for back := l.counting.Back(); back != nil; back = l.counting.Back() {
+		e := back.Value.(*entry)
+		if !l.idleForAWindow(e, now) {
+			break
+		}
+		l.removeLocked(e)
+	}
+	for back := l.locks.Back(); back != nil; back = l.locks.Back() {
+		e := back.Value.(*entry)
+		if now.Before(e.lockedUntil) {
+			break
+		}
+		l.removeLocked(e)
+	}
+}
+
+// saturatedLocked reports whether the limiter is full of lockouts, leaving no
+// entry that may be displaced for a new key. Callers must hold l.mu.
+func (l *AttemptLimiter) saturatedLocked() bool {
+	return len(l.entries) >= l.policy.MaxTrackedKeys && l.counting.Len() == 0
+}
+
+// makeRoomLocked guarantees space for one more key by displacing the least
+// recently active unlocked key. It reports false, changing nothing, when every
+// tracked key is locked. Callers must hold l.mu.
+func (l *AttemptLimiter) makeRoomLocked() bool {
+	if len(l.entries) < l.policy.MaxTrackedKeys {
+		return true
+	}
+	back := l.counting.Back()
+	if back == nil {
 		return false
 	}
-	st.failures++
-	st.lastActivity = now
-	if st.failures != l.policy.Threshold+1 {
-		return false
-	}
-	st.lockedUntil = now.Add(l.policy.LockoutWindow)
+	l.removeLocked(back.Value.(*entry))
 	return true
 }
 
-// RecordSuccess forgets key's strikes, e.g. after a correct password.
-func (l *AttemptLimiter) RecordSuccess(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.state, key)
-}
-
-// stateForFailureLocked returns key's state ready to count a failure at now:
-// freshly inserted for a new key, reset when its strikes or lockout have aged
-// out. Callers must hold l.mu.
-func (l *AttemptLimiter) stateForFailureLocked(key string, now time.Time) *attemptState {
-	st, ok := l.state[key]
-	if !ok {
-		l.makeRoomLocked(now)
-		st = &attemptState{}
-		l.state[key] = st
-		return st
-	}
-	if l.expiredLocked(st, now) {
-		*st = attemptState{}
-	}
-	return st
-}
-
-// expiredLocked reports whether st holds nothing worth keeping as of now:
-// its lockout (if any) has ended and it has been idle for a full window.
-func (l *AttemptLimiter) expiredLocked(st *attemptState, now time.Time) bool {
-	if now.Before(st.lockedUntil) {
-		return false
-	}
-	return !st.lastActivity.After(now.Add(-l.policy.LockoutWindow))
-}
-
-// makeRoomLocked guarantees space for one more key. It sweeps expired
-// entries first so live lockouts survive, and only evicts the least recently
-// active entry when every tracked key is still live. Callers must hold l.mu.
-func (l *AttemptLimiter) makeRoomLocked(now time.Time) {
-	if len(l.state) < l.policy.MaxTrackedKeys {
-		return
-	}
-	for key, st := range l.state {
-		if l.expiredLocked(st, now) {
-			delete(l.state, key)
-		}
-	}
-	if len(l.state) < l.policy.MaxTrackedKeys {
-		return
-	}
-	l.evictLeastRecentlyActiveLocked()
-}
-
-// evictLeastRecentlyActiveLocked drops the entry with the oldest activity.
+// lockLocked moves e into the lockout list, locked until one window after now.
 // Callers must hold l.mu.
-func (l *AttemptLimiter) evictLeastRecentlyActiveLocked() {
-	var oldestKey string
-	var oldest time.Time
-	found := false
-	for key, st := range l.state {
-		if !found || st.lastActivity.Before(oldest) {
-			oldestKey, oldest, found = key, st.lastActivity, true
-		}
+func (l *AttemptLimiter) lockLocked(e *entry, now time.Time) {
+	l.counting.Remove(e.element)
+	e.locked = true
+	e.lockedUntil = now.Add(l.policy.LockoutWindow)
+	e.element = l.locks.PushFront(e)
+}
+
+// removeLocked deletes e from the map and whichever list holds it. Callers
+// must hold l.mu.
+func (l *AttemptLimiter) removeLocked(e *entry) {
+	if e.locked {
+		l.locks.Remove(e.element)
+	} else {
+		l.counting.Remove(e.element)
 	}
-	if found {
-		delete(l.state, oldestKey)
-	}
+	delete(l.entries, e.key)
 }
