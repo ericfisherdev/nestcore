@@ -403,3 +403,48 @@ func TestAttemptLimiter_CancelIgnoresAReservationFromAnExpiredEntry(t *testing.T
 		t.Errorf("attempt #%d on the replacement entry = %v, want AllowedLastAttempt (the stale cancel altered its count)", testThreshold, got)
 	}
 }
+
+// TestAttemptLimiter_InFlightCancelsLeaveNoStrikesInAnyOrder: Threshold
+// requests are admitted before any of them finishes (the last engaging the
+// lockout) and all end in internal errors. However their cancels interleave,
+// none of the attempts may be left counted.
+func TestAttemptLimiter_InFlightCancelsLeaveNoStrikesInAnyOrder(t *testing.T) {
+	orders := map[string]func(n int) []int{
+		"engaging attempt first": func(n int) []int { return rotate(n, n-1) },
+		"engaging attempt last":  func(n int) []int { return rotate(n, 0) },
+		"engaging attempt middle": func(n int) []int {
+			return rotate(n, n/2)
+		},
+	}
+	for name, order := range orders {
+		t.Run(name, func(t *testing.T) {
+			l := newLimiter()
+			now := time.Now()
+			reservations := make([]ratelimit.Reservation, testThreshold)
+			for i := range reservations {
+				_, reservations[i] = l.Reserve(testKey, now)
+			}
+
+			for _, i := range order(testThreshold) {
+				l.Cancel(reservations[i])
+			}
+
+			if l.Locked(testKey, now) {
+				t.Error("key locked by attempts that were all cancelled")
+			}
+			if got := attempt(l, testKey, now, testThreshold); got != ratelimit.AllowedLastAttempt {
+				t.Errorf("full budget expected after cancelling everything, last outcome = %v", got)
+			}
+		})
+	}
+}
+
+// rotate returns 0..n-1 starting at start and wrapping, so that the engaging
+// reservation (index n-1) lands at a chosen position in the cancel order.
+func rotate(n, start int) []int {
+	out := make([]int, 0, n)
+	for i := range n {
+		out = append(out, (start+i)%n)
+	}
+	return out
+}

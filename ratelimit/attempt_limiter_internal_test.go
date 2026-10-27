@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"container/list"
 	"fmt"
 	"testing"
 	"time"
@@ -177,4 +178,56 @@ func TestAttemptLimiter_CancelIgnoresAReservationFromAnEvictedEntry(t *testing.T
 	if got := l.entries[key].attempts; got != 1 {
 		t.Errorf("replacement entry attempts = %d, want 1 (the stale cancel must change nothing)", got)
 	}
+}
+
+// assertOrderedByActivity checks the invariant expiry relies on: each list
+// runs from most to least recently active, so its back is always the oldest.
+func assertOrderedByActivity(t *testing.T, l *AttemptLimiter) {
+	t.Helper()
+	for name, lst := range map[string]*list.List{"counting": l.counting, "locks": l.locks} {
+		for el := lst.Front(); el != nil && el.Next() != nil; el = el.Next() {
+			if el.Value.(*entry).lastActivity.Before(el.Next().Value.(*entry).lastActivity) {
+				t.Fatalf("%s list is out of activity order", name)
+			}
+		}
+	}
+}
+
+// TestAttemptLimiter_CancelKeepsTheCountingListOrderedByActivity: a key
+// returned to the counting list by Cancel must not sit in front of keys that
+// were active after its stale timestamp, or expiry stops at the wrong entry.
+func TestAttemptLimiter_CancelKeepsTheCountingListOrderedByActivity(t *testing.T) {
+	l := newBoundedLimiter()
+	t0 := time.Now()
+	const a, b = "email:a@example.com", "email:b@example.com"
+	l.Attempt(a, t0)
+	_, engaging := l.Reserve(a, t0)
+	l.Attempt(b, t0.Add(time.Minute))
+
+	l.Cancel(engaging)
+
+	assertOrderedByActivity(t, l)
+	assertConsistent(t, l)
+
+	// Both are idle for a full window by then, so expiry must reach both.
+	l.Locked("email:probe@example.com", t0.Add(time.Minute+boundedWindow+time.Second))
+	if got := len(l.entries); got != 0 {
+		t.Errorf("tracked keys after both aged out = %d, want 0 (expiry stopped at a mis-ordered entry)", got)
+	}
+}
+
+func TestAttemptLimiter_CancelAfterTheLockoutExpiredDoesNotResurrectTheKey(t *testing.T) {
+	l := newBoundedLimiter()
+	t0 := time.Now()
+	const key = "email:a@example.com"
+	l.Attempt(key, t0)
+	_, engaging := l.Reserve(key, t0)
+
+	l.Locked("email:probe@example.com", t0.Add(boundedWindow+time.Second)) // time moves on; the lockout lapses
+	l.Cancel(engaging)
+
+	if _, kept := l.entries[key]; kept {
+		t.Error("a cancel arriving after the lockout expired must not bring the key back")
+	}
+	assertConsistent(t, l)
 }
