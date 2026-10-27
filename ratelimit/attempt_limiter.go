@@ -71,6 +71,28 @@ type entry struct {
 // one window after the attempt that engaged it, so each list expires from its
 // back and every operation is amortised O(1) however many keys are tracked.
 // Callers must pass non-decreasing times.
+//
+// # Threat model
+//
+// Keys are attacker-supplied, so the table is capped, and a full table forces
+// a trade between two attacks: evicting lockouts would let a flood of distinct
+// keys erase a victim's lockout, while refusing new keys would let the same
+// flood deny every legitimate user. The settled design is: lockouts are never
+// evicted; a slot is made by dropping the least recently active counting key
+// (one that has not yet used its budget); and only when every slot holds a
+// live lockout are new keys denied.
+//
+// The residual risk is that a flood can erase another source's in-progress
+// strikes, or, if it fills every slot with lockouts, deny new keys until one
+// expires. Both need on the order of MaxTrackedKeys distinct keys within one
+// window. That is only affordable when the flood is not itself throttled, so
+// callers must pair a per-key limiter (an account) with a per-client one (an
+// IP) and consult the client limiter FIRST: one source then locks out after
+// its own Threshold and cannot mint distinct account keys faster than that.
+// Filling the table then takes roughly MaxTrackedKeys distinct client
+// addresses. Size MaxTrackedKeys generously: an entry costs about 250 bytes
+// (key string, entry, list element and map slot), so 50,000 keys is about
+// 12 MB.
 type AttemptLimiter struct {
 	policy Policy
 
