@@ -12,9 +12,11 @@
 // [AttemptLimiter.Attempt] checks the lockout and counts the attempt under one
 // lock. Checking first and recording afterwards would let any number of
 // concurrent requests pass the check before the first is counted. A caller
-// that wants only failures to count gives a successful attempt back with
-// [AttemptLimiter.Reset] (forget the key) or [AttemptLimiter.Refund] (return
-// that one attempt, for keys a success must not clear).
+// that wants a success to clear a key calls [AttemptLimiter.Reset]. A key whose
+// success must not clear it simply keeps the attempt counted, so an attacker
+// holding one valid credential cannot interleave successes to wipe the strikes
+// of their guessing. [AttemptLimiter.Refund] returns one attempt of a key that
+// is still counting (for an internal error, say) and never lifts a lockout.
 //
 // # Bounded memory
 //
