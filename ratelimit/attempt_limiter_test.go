@@ -296,3 +296,87 @@ func TestNewAttemptLimiter_InvalidPolicyPanics(t *testing.T) {
 		})
 	}
 }
+
+func TestAttemptLimiter_CancelOfTheEngagingAttemptLiftsTheLockout(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+	attempt(l, testKey, now, testThreshold-1)
+	outcome, engaging := l.Reserve(testKey, now)
+	if outcome != ratelimit.AllowedLastAttempt {
+		t.Fatalf("setup: outcome = %v, want AllowedLastAttempt", outcome)
+	}
+
+	l.Cancel(engaging)
+
+	if l.Locked(testKey, now) {
+		t.Error("cancelling the attempt that engaged the lockout must lift it")
+	}
+	if got := l.Attempt(testKey, now); got != ratelimit.AllowedLastAttempt {
+		t.Errorf("attempt after the cancel = %v, want AllowedLastAttempt (one attempt given back)", got)
+	}
+}
+
+// TestAttemptLimiter_CancelOfAnEarlierAttemptNeverLiftsALockout: an attempt
+// admitted before the lockout engaged may be cancelled after it. That must not
+// undo the strikes that locked the key.
+func TestAttemptLimiter_CancelOfAnEarlierAttemptNeverLiftsALockout(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+	_, earlier := l.Reserve(testKey, now)
+	attempt(l, testKey, now, testThreshold-1)
+	if !l.Locked(testKey, now) {
+		t.Fatal("setup: expected the key to be locked")
+	}
+
+	l.Cancel(earlier)
+
+	if !l.Locked(testKey, now) {
+		t.Error("cancelling an attempt that did not engage the lockout must leave it standing")
+	}
+}
+
+func TestAttemptLimiter_CancelledInternalErrorsNeverLockAKey(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+
+	for range testThreshold * 4 {
+		outcome, res := l.Reserve(testKey, now)
+		if !outcome.Permitted() {
+			t.Fatal("a key whose every attempt is cancelled must never lock")
+		}
+		l.Cancel(res)
+	}
+
+	if got := attempt(l, testKey, now, testThreshold); got != ratelimit.AllowedLastAttempt {
+		t.Errorf("full budget expected after cancelling everything, last outcome = %v", got)
+	}
+}
+
+func TestAttemptLimiter_CancelIgnoresStaleAndEmptyReservations(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+
+	_, old := l.Reserve(testKey, now)
+	l.Reset(testKey)
+	attempt(l, testKey, now, testThreshold-1) // a new entry, one attempt from locking
+
+	l.Cancel(old)                     // from a reset entry
+	l.Cancel(ratelimit.Reservation{}) // a denied attempt's zero value
+
+	if got := l.Attempt(testKey, now); got != ratelimit.AllowedLastAttempt {
+		t.Errorf("outcome = %v, want AllowedLastAttempt (stale cancels must change nothing)", got)
+	}
+}
+
+func TestAttemptLimiter_DeniedAttemptReturnsAnEmptyReservation(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+	lockOut(t, l, testKey, now)
+
+	outcome, res := l.Reserve(testKey, now)
+	l.Cancel(res)
+
+	if outcome != ratelimit.Denied || !l.Locked(testKey, now) {
+		t.Errorf("outcome = %v, locked = %v, want Denied and still locked", outcome, l.Locked(testKey, now))
+	}
+}

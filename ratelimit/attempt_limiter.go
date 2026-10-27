@@ -49,6 +49,7 @@ func (o Outcome) Permitted() bool { return o != Denied }
 // limiter's two recency lists, described on [AttemptLimiter].
 type entry struct {
 	key          string
+	epoch        uint64
 	attempts     int
 	locked       bool
 	lockedUntil  time.Time
@@ -64,9 +65,9 @@ type entry struct {
 // lock, so concurrent requests cannot all slip past a check made before any of
 // them is counted. A caller that wants a success to clear a key calls
 // [AttemptLimiter.Reset]; a key a success must not clear keeps the attempt
-// counted. [AttemptLimiter.Refund] is only for attempts that should never have
-// counted (an internal error, a request rejected by a second limiter) and never
-// lifts a lockout.
+// counted. An attempt that should never have counted (an internal error, a
+// request rejected by a second limiter) is taken back with
+// [AttemptLimiter.Cancel] using the [Reservation] from [AttemptLimiter.Reserve].
 //
 // Entries are kept in two lists, each ordered by recency of activity: keys
 // still collecting attempts, and keys that are locked. A lockout ends exactly
@@ -98,10 +99,11 @@ type entry struct {
 type AttemptLimiter struct {
 	policy Policy
 
-	mu       sync.Mutex
-	entries  map[string]*entry
-	counting *list.List // unlocked entries, most recently active first
-	locks    *list.List // locked entries, most recently locked first
+	mu        sync.Mutex
+	entries   map[string]*entry
+	nextEpoch uint64
+	counting  *list.List // unlocked entries, most recently active first
+	locks     *list.List // locked entries, most recently locked first
 }
 
 // NewAttemptLimiter constructs an empty limiter enforcing p.
@@ -146,8 +148,25 @@ func (l *AttemptLimiter) Locked(key string, now time.Time) bool {
 //
 // A denied attempt is not counted, so retrying a locked key does not extend
 // its lockout. The Threshold-th admitted attempt returns
-// [AllowedLastAttempt] and locks the key for Policy.LockoutWindow.
+// [AllowedLastAttempt] and locks the key for Policy.LockoutWindow. Use
+// [AttemptLimiter.Reserve] instead when the attempt may have to be cancelled.
 func (l *AttemptLimiter) Attempt(key string, now time.Time) Outcome {
+	outcome, _ := l.Reserve(key, now)
+	return outcome
+}
+
+// Reservation identifies one admitted attempt so it can be taken back with
+// [AttemptLimiter.Cancel]. The zero value (what a denied attempt returns)
+// cancels nothing.
+type Reservation struct {
+	key     string
+	epoch   uint64
+	engaged bool
+}
+
+// Reserve is [AttemptLimiter.Attempt] that also returns a [Reservation] for
+// the attempt it admitted.
+func (l *AttemptLimiter) Reserve(key string, now time.Time) (Outcome, Reservation) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.expireLocked(now)
@@ -156,23 +175,49 @@ func (l *AttemptLimiter) Attempt(key string, now time.Time) Outcome {
 	switch {
 	case !tracked:
 		if !l.makeRoomLocked() {
-			return Denied
+			return Denied, Reservation{}
 		}
-		e = &entry{key: key}
+		l.nextEpoch++
+		e = &entry{key: key, epoch: l.nextEpoch}
 		e.element = l.counting.PushFront(e)
 		l.entries[key] = e
 	case e.locked && now.Before(e.lockedUntil):
-		return Denied
+		return Denied, Reservation{}
 	}
 
 	e.attempts++
 	e.lastActivity = now
 	if e.attempts < l.policy.Threshold {
 		l.counting.MoveToFront(e.element)
-		return Allowed
+		return Allowed, Reservation{key: key, epoch: e.epoch}
 	}
 	l.lockLocked(e, now)
-	return AllowedLastAttempt
+	return AllowedLastAttempt, Reservation{key: key, epoch: e.epoch, engaged: true}
+}
+
+// Cancel takes back the attempt behind r, for an attempt that should never
+// have counted (an internal error, a request rejected by a second limiter).
+// Call it at most once per reservation.
+//
+// It is exact about which attempt it cancels. If r is the attempt that
+// engaged the key's lockout, the lockout is lifted with it; if the lockout was
+// engaged by a different attempt, it stands, so an unrelated in-flight attempt
+// can never undo an attacker's strikes. A reservation that outlived its entry
+// (reset, expired or evicted since) cancels nothing.
+func (l *AttemptLimiter) Cancel(r Reservation) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, tracked := l.entries[r.key]
+	if !tracked || r.epoch == 0 || e.epoch != r.epoch || (e.locked && !r.engaged) {
+		return
+	}
+	e.attempts--
+	switch {
+	case e.attempts == 0:
+		l.removeLocked(e)
+	case e.locked:
+		l.unlockLocked(e)
+	}
 }
 
 // Refund gives back one attempt previously admitted for key, for an attempt
@@ -183,6 +228,10 @@ func (l *AttemptLimiter) Attempt(key string, now time.Time) Outcome {
 // lockout or to an unrelated earlier one, and lifting a lockout on the
 // strength of the latter would let any in-flight success undo an attacker's
 // strikes. The lockout stands until it expires or [AttemptLimiter.Reset].
+//
+// Deprecated: Refund cannot say which attempt it returns, so it cannot undo an
+// attempt that engaged a lockout. Use [AttemptLimiter.Reserve] and
+// [AttemptLimiter.Cancel].
 func (l *AttemptLimiter) Refund(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -258,6 +307,15 @@ func (l *AttemptLimiter) lockLocked(e *entry, now time.Time) {
 	e.locked = true
 	e.lockedUntil = now.Add(l.policy.LockoutWindow)
 	e.element = l.locks.PushFront(e)
+}
+
+// unlockLocked returns e to the counting list, lifting its lockout. Callers
+// must hold l.mu.
+func (l *AttemptLimiter) unlockLocked(e *entry) {
+	l.locks.Remove(e.element)
+	e.locked = false
+	e.lockedUntil = time.Time{}
+	e.element = l.counting.PushFront(e)
 }
 
 // removeLocked deletes e from the map and whichever list holds it. Callers
