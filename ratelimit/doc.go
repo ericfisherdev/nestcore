@@ -15,8 +15,11 @@
 // that wants a success to clear a key calls [AttemptLimiter.Reset]. A key whose
 // success must not clear it simply keeps the attempt counted, so an attacker
 // holding one valid credential cannot interleave successes to wipe the strikes
-// of their guessing. [AttemptLimiter.Refund] returns one attempt of a key that
-// is still counting (for an internal error, say) and never lifts a lockout.
+// of their guessing. An attempt that should never have counted (an internal
+// error, a request rejected by a second limiter) is taken back with
+// [AttemptLimiter.Cancel] and the [Reservation] from [AttemptLimiter.Reserve];
+// cancelling the very attempt that engaged a lockout lifts it, while cancelling
+// any other never does.
 //
 // # Bounded memory
 //
