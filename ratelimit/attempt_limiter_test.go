@@ -380,3 +380,26 @@ func TestAttemptLimiter_DeniedAttemptReturnsAnEmptyReservation(t *testing.T) {
 		t.Errorf("outcome = %v, locked = %v, want Denied and still locked", outcome, l.Locked(testKey, now))
 	}
 }
+
+// TestAttemptLimiter_CancelIgnoresAReservationFromAnExpiredEntry: the lockout
+// the reservation engaged has expired and the key started a fresh run; the old
+// reservation must not shave an attempt off the new one.
+func TestAttemptLimiter_CancelIgnoresAReservationFromAnExpiredEntry(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+	attempt(l, testKey, now, testThreshold-1)
+	_, engaging := l.Reserve(testKey, now)
+
+	afterWindow := now.Add(testWindow + time.Second)
+	l.Attempt(testKey, afterWindow) // the replacement entry's first attempt
+	l.Cancel(engaging)
+
+	for i := 2; i < testThreshold; i++ {
+		if got := l.Attempt(testKey, afterWindow); got != ratelimit.Allowed {
+			t.Fatalf("attempt #%d on the replacement entry = %v, want Allowed", i, got)
+		}
+	}
+	if got := l.Attempt(testKey, afterWindow); got != ratelimit.AllowedLastAttempt {
+		t.Errorf("attempt #%d on the replacement entry = %v, want AllowedLastAttempt (the stale cancel altered its count)", testThreshold, got)
+	}
+}

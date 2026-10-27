@@ -154,3 +154,27 @@ func TestAttemptLimiter_RefundToZeroLeavesNoEntry(t *testing.T) {
 		t.Errorf("entries = %d, counting = %d after refunding the only attempt, want 0", len(l.entries), l.counting.Len())
 	}
 }
+
+// TestAttemptLimiter_CancelIgnoresAReservationFromAnEvictedEntry: the key was
+// pushed out of the table and later re-admitted as a new entry; the old
+// reservation must leave the replacement alone.
+func TestAttemptLimiter_CancelIgnoresAReservationFromAnEvictedEntry(t *testing.T) {
+	l := newBoundedLimiter()
+	now := time.Now()
+	const key = "email:evicted@example.com"
+	_, old := l.Reserve(key, now)
+
+	for i := range boundedKeys {
+		l.Attempt(distinctKey(i), now.Add(time.Duration(i+1)*time.Millisecond))
+	}
+	if _, kept := l.entries[key]; kept {
+		t.Fatal("setup: the key should have been evicted")
+	}
+	l.Attempt(key, now.Add(time.Second))
+
+	l.Cancel(old)
+
+	if got := l.entries[key].attempts; got != 1 {
+		t.Errorf("replacement entry attempts = %d, want 1 (the stale cancel must change nothing)", got)
+	}
+}
