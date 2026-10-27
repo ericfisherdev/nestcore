@@ -62,9 +62,11 @@ type entry struct {
 //
 // [AttemptLimiter.Attempt] checks the lockout and counts the attempt under one
 // lock, so concurrent requests cannot all slip past a check made before any of
-// them is counted. A caller that wants only failures to count reports a
-// successful attempt back with [AttemptLimiter.Reset] or
-// [AttemptLimiter.Refund].
+// them is counted. A caller that wants a success to clear a key calls
+// [AttemptLimiter.Reset]; a key a success must not clear keeps the attempt
+// counted. [AttemptLimiter.Refund] is only for attempts that should never have
+// counted (an internal error, a request rejected by a second limiter) and never
+// lifts a lockout.
 //
 // Entries are kept in two lists, each ordered by recency of activity: keys
 // still collecting attempts, and keys that are locked. A lockout ends exactly
