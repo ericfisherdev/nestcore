@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ericfisherdev/nestcore/config"
 	"github.com/ericfisherdev/nestcore/httpserver"
+	"github.com/ericfisherdev/nestcore/httpserver/middleware"
 )
 
 // testConfig returns a minimal Config for building the server in tests.
@@ -125,6 +127,44 @@ func TestServerStartsAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Serve did not return after Shutdown")
+	}
+}
+
+// cspHeaderFor serves GET /healthz through a server built from cfg and returns
+// every Content-Security-Policy header value on the response.
+func cspHeaderFor(t *testing.T, cfg httpserver.Config) []string {
+	t.Helper()
+	srv := httpserver.New(cfg, httpserver.Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	return rec.Header().Values("Content-Security-Policy")
+}
+
+// TestContentSecurityPolicy verifies the zero-value Config keeps the
+// historical frame-ancestors-only policy and that a configured Config.CSP is
+// emitted verbatim.
+func TestContentSecurityPolicy(t *testing.T) {
+	custom := middleware.ContentSecurityPolicy{
+		{Name: "default-src", Values: []string{"'self'"}},
+		{Name: "object-src", Values: []string{"'none'"}},
+	}
+	tests := []struct {
+		name string
+		csp  middleware.ContentSecurityPolicy
+		want []string
+	}{
+		{name: "zero value keeps the frame-ancestors default", csp: nil, want: []string{"frame-ancestors 'self'"}},
+		{name: "configured policy is emitted verbatim", csp: custom, want: []string{"default-src 'self'; object-src 'none'"}},
+		{name: "non-nil empty policy suppresses the header", csp: middleware.ContentSecurityPolicy{}, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.CSP = tt.csp
+			if got := cspHeaderFor(t, cfg); !slices.Equal(got, tt.want) {
+				t.Errorf("Content-Security-Policy = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
