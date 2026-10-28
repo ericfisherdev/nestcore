@@ -50,7 +50,7 @@ type Config struct {
 	Server config.ServerConfig
 	HSTS   config.HSTSConfig
 	// CSP is the Content-Security-Policy emitted on every response. The zero
-	// value (nil) means middleware.FrameAncestorsSelf, so an application that
+	// value (nil) means middleware.DefaultCSP, so an application that
 	// sets nothing keeps the historical frame-ancestors-only header; an
 	// application opts into a stricter policy by setting this field. Only nil
 	// selects the default: a non-nil empty policy is honoured and suppresses
@@ -180,10 +180,10 @@ func New(cfg Config, deps Deps) *http.Server {
 	}
 }
 
-// cspOrDefault returns p, or middleware.FrameAncestorsSelf when p is unset.
+// cspOrDefault returns p, or a fresh middleware.DefaultCSP when p is unset.
 func cspOrDefault(p middleware.ContentSecurityPolicy) middleware.ContentSecurityPolicy {
 	if p == nil {
-		return middleware.FrameAncestorsSelf
+		return middleware.DefaultCSP()
 	}
 	return p
 }
