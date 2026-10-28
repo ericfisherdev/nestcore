@@ -114,25 +114,13 @@ func TestSecurityHeadersWithPolicy(t *testing.T) {
 			hdr := runWithMiddleware(t, middleware.SecurityHeadersWithPolicy(hsts, tt.policy), func(r *http.Request) {
 				r.Header.Set("X-Forwarded-Proto", "https")
 			})
-			vals := hdr.Values("Content-Security-Policy")
-			if tt.wantSet {
-				if len(vals) != 1 || vals[0] != tt.wantCSP {
-					t.Errorf("Content-Security-Policy = %q, want exactly [%q]", vals, tt.wantCSP)
-				}
-			} else if len(vals) != 0 {
-				t.Errorf("Content-Security-Policy = %q, want absent", vals)
-			}
-			want := map[string]string{
+			assertCSPValues(t, hdr.Values("Content-Security-Policy"), tt.wantCSP, tt.wantSet)
+			assertHeaders(t, hdr, map[string]string{
 				"X-Content-Type-Options":    "nosniff",
 				"Referrer-Policy":           "strict-origin-when-cross-origin",
 				"X-Frame-Options":           "SAMEORIGIN",
 				"Strict-Transport-Security": hsts,
-			}
-			for k, v := range want {
-				if got := hdr.Get(k); got != v {
-					t.Errorf("%s = %q, want %q", k, got, v)
-				}
-			}
+			})
 		})
 	}
 
@@ -142,4 +130,29 @@ func TestSecurityHeadersWithPolicy(t *testing.T) {
 			t.Errorf("Strict-Transport-Security = %q, want empty over http", got)
 		}
 	})
+}
+
+// assertCSPValues checks the Content-Security-Policy values: exactly one equal
+// to want when wantSet, none otherwise.
+func assertCSPValues(t *testing.T, got []string, want string, wantSet bool) {
+	t.Helper()
+	if !wantSet {
+		if len(got) != 0 {
+			t.Errorf("Content-Security-Policy = %q, want absent", got)
+		}
+		return
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("Content-Security-Policy = %q, want exactly [%q]", got, want)
+	}
+}
+
+// assertHeaders checks that each header in want has exactly the given value.
+func assertHeaders(t *testing.T, hdr http.Header, want map[string]string) {
+	t.Helper()
+	for k, v := range want {
+		if got := hdr.Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
 }
