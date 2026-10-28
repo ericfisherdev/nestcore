@@ -54,3 +54,23 @@ func TestContentSecurityPolicyString(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultCSP_ReturnsIndependentCopies(t *testing.T) {
+	first := middleware.DefaultCSP()
+	first[0].Values[0] = "'none'"
+
+	if got := middleware.DefaultCSP().String(); got != "frame-ancestors 'self'" {
+		t.Errorf("DefaultCSP() after mutating an earlier result = %q, want %q", got, "frame-ancestors 'self'")
+	}
+}
+
+func TestSecurityHeaders_IgnoresMutationOfExportedDefault(t *testing.T) {
+	original := middleware.FrameAncestorsSelf[0].Values[0]
+	middleware.FrameAncestorsSelf[0].Values[0] = "*"
+	t.Cleanup(func() { middleware.FrameAncestorsSelf[0].Values[0] = original })
+
+	got := runSecurity(t, "", nil).Get("Content-Security-Policy")
+	if got != "frame-ancestors 'self'" {
+		t.Errorf("Content-Security-Policy = %q, want %q", got, "frame-ancestors 'self'")
+	}
+}

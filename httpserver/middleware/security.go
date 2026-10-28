@@ -5,7 +5,7 @@ import "net/http"
 // SecurityHeaders sets baseline security response headers on every response, and
 // HSTS only over an effective-HTTPS request. The headers are applied before the
 // handler runs so they survive on every status code. It emits the historical
-// FrameAncestorsSelf policy; use SecurityHeadersWithPolicy to supply a stricter
+// DefaultCSP policy; use SecurityHeadersWithPolicy to supply a stricter
 // Content-Security-Policy.
 //
 // hsts is the precomputed Strict-Transport-Security value (e.g.
@@ -14,7 +14,7 @@ import "net/http"
 // (IsHTTPS, set by ForwardedHeaders), so it is never sent over the plain-HTTP
 // internal hop behind a TLS-terminating proxy.
 func SecurityHeaders(hsts string) Middleware {
-	return SecurityHeadersWithPolicy(hsts, FrameAncestorsSelf)
+	return SecurityHeadersWithPolicy(hsts, DefaultCSP())
 }
 
 // SecurityHeadersWithPolicy is SecurityHeaders with a caller-supplied

@@ -33,10 +33,18 @@ func (p ContentSecurityPolicy) String() string {
 	return strings.Join(directives, "; ")
 }
 
-// FrameAncestorsSelf is the historical default policy: it only restricts
-// framing to the page's own origin and leaves every fetch directive open. It
-// is what SecurityHeaders emits and what httpserver.New uses when
-// Config.CSP is unset.
-var FrameAncestorsSelf = ContentSecurityPolicy{
-	{Name: "frame-ancestors", Values: []string{"'self'"}},
+// DefaultCSP returns a fresh copy of the historical default policy: it only
+// restricts framing to the page's own origin and leaves every fetch directive
+// open. SecurityHeaders and httpserver.New use it when no policy is supplied.
+// Each call allocates new slices, so mutating one result never changes the
+// framing policy another caller receives.
+func DefaultCSP() ContentSecurityPolicy {
+	return ContentSecurityPolicy{
+		{Name: "frame-ancestors", Values: []string{"'self'"}},
+	}
 }
+
+// FrameAncestorsSelf is a package-level value of DefaultCSP for callers that
+// want to reference or extend the default. SecurityHeaders and httpserver.New
+// do not read it, so mutating its slices cannot weaken their framing policy.
+var FrameAncestorsSelf = DefaultCSP()
